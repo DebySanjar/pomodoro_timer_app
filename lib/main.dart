@@ -19,6 +19,8 @@ void main() async {
   await Hive.openBox('settings');
   await Hive.openBox('tasks');
   await Hive.openBox('stats');
+  await Hive.openBox('analytics');
+  await Hive.openBox('focus');
   await SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
   runApp(const PomodoroApp());
 }
@@ -64,6 +66,7 @@ class _PomodoroAppState extends State<PomodoroApp> {
   );
 }
 
+// ==================== MODELS ====================
 class Task {
   String id, title;
   List<SubTask> subTasks;
@@ -137,6 +140,79 @@ class SubTask {
   );
 }
 
+class FocusSession {
+  DateTime date;
+  int hour;
+  int minutes;
+  int pomodoros;
+  bool isDeepWork;
+
+  FocusSession({
+    required this.date,
+    required this.hour,
+    required this.minutes,
+    required this.pomodoros,
+    this.isDeepWork = false,
+  });
+
+  Map<String, dynamic> toJson() => {
+    'date': date.toIso8601String(),
+    'hour': hour,
+    'minutes': minutes,
+    'pomodoros': pomodoros,
+    'isDeepWork': isDeepWork,
+  };
+
+  factory FocusSession.fromJson(Map<String, dynamic> json) => FocusSession(
+    date: DateTime.tryParse(json['date'] ?? '') ?? DateTime.now(),
+    hour: json['hour'] ?? 0,
+    minutes: json['minutes'] ?? 0,
+    pomodoros: json['pomodoros'] ?? 0,
+    isDeepWork: json['isDeepWork'] ?? false,
+  );
+}
+
+class DailyGoal {
+  int targetPomodoros;
+  int targetMinutes;
+  int completedPomodoros;
+  int completedMinutes;
+  DateTime date;
+
+  DailyGoal({
+    this.targetPomodoros = 8,
+    this.targetMinutes = 200,
+    this.completedPomodoros = 0,
+    this.completedMinutes = 0,
+    required this.date,
+  });
+
+  Map<String, dynamic> toJson() => {
+    'targetPomodoros': targetPomodoros,
+    'targetMinutes': targetMinutes,
+    'completedPomodoros': completedPomodoros,
+    'completedMinutes': completedMinutes,
+    'date': date.toIso8601String(),
+  };
+
+  factory DailyGoal.fromJson(Map<String, dynamic> json) => DailyGoal(
+    targetPomodoros: json['targetPomodoros'] ?? 8,
+    targetMinutes: json['targetMinutes'] ?? 200,
+    completedPomodoros: json['completedPomodoros'] ?? 0,
+    completedMinutes: json['completedMinutes'] ?? 0,
+    date: DateTime.tryParse(json['date'] ?? '') ?? DateTime.now(),
+  );
+
+  double get pomodoroProgress => targetPomodoros > 0
+      ? (completedPomodoros / targetPomodoros).clamp(0.0, 1.0)
+      : 0.0;
+
+  double get minutesProgress => targetMinutes > 0
+      ? (completedMinutes / targetMinutes).clamp(0.0, 1.0)
+      : 0.0;
+}
+
+// ==================== MAIN HOME ====================
 class PomodoroHome extends StatefulWidget {
   final bool isDark;
   final VoidCallback onThemeToggle;
@@ -152,12 +228,12 @@ class PomodoroHome extends StatefulWidget {
 }
 
 class _PomodoroHomeState extends State<PomodoroHome>
-    with TickerProviderStateMixin {
+    with TickerProviderStateMixin, WidgetsBindingObserver {
   final FlutterLocalNotificationsPlugin notifications =
       FlutterLocalNotificationsPlugin();
   final AudioPlayer bgAudioPlayer = AudioPlayer();
   late ConfettiController _confettiController;
-  late Box settingsBox, tasksBox, statsBox;
+  late Box settingsBox, tasksBox, statsBox, analyticsBox, focusBox;
 
   List<Task> tasks = [];
   Task? currentTask;
@@ -187,44 +263,85 @@ class _PomodoroHomeState extends State<PomodoroHome>
   int selectedSoundIndex = 0;
   final List<String> soundFiles = [
     'rain.mp3',
-    'forest.mp3',
+    'night.mp3',
     'ocean.mp3',
     'fire.mp3',
-    'wind.mp3',
+    'job.mp3',
     'birds.mp3',
-    'thunder.mp3',
-    'cafe.mp3',
     'piano.mp3',
-    'white_noise.mp3',
+    'motiv.mp3',
   ];
   final List<String> soundNames = [
     'Rain',
-    'Forest',
+    'Night Drive',
     'Ocean',
     'Fire',
-    'Wind',
+    'Job',
     'Birds',
-    'Thunder',
-    'Cafe',
     'Piano',
-    'White Noise',
+    'Motiv',
   ];
 
   String selectedCategory = 'All';
   List<String> categories = ['All', 'Work', 'Study', 'Personal', 'Other'];
 
+  // ========== FOCUS MODE ==========
+  bool focusModeEnabled = true;
+  int focusStreak = 0;
+  int deepWorkSessions = 0;
+  DateTime? lastFocusDate;
+  DailyGoal? todayGoal;
+  int weeklyGoalPomodoros = 40;
+  int weeklyCompletedPomodoros = 0;
+
+  // ========== ANALYTICS ==========
+  List<FocusSession> focusSessions = [];
+  Map<String, int> heatmapData = {};
+  List<int> hourlyProductivity = List.filled(24, 0);
+  int totalTasksCompleted = 0;
+  double avgFocusTime = 0;
+
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     settingsBox = Hive.box('settings');
     tasksBox = Hive.box('tasks');
     statsBox = Hive.box('stats');
+    analyticsBox = Hive.box('analytics');
+    focusBox = Hive.box('focus');
     _initNotifications();
     _loadData();
+    _loadAnalytics();
+    _loadFocusData();
     _confettiController = ConfettiController(
       duration: const Duration(seconds: 3),
     );
     bgAudioPlayer.setReleaseMode(ReleaseMode.loop);
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (isRunning && focusModeEnabled && state == AppLifecycleState.paused) {
+      _showFocusWarning();
+    }
+  }
+
+  void _showFocusWarning() {
+    notifications.show(
+      1,
+      '🎯 Stay Focused!',
+      'Come back to your Pomodoro session!',
+      const NotificationDetails(
+        android: AndroidNotificationDetails(
+          'focus_channel',
+          'Focus Notifications',
+          importance: Importance.max,
+          priority: Priority.max,
+          ongoing: true,
+        ),
+      ),
+    );
   }
 
   Future<void> _initNotifications() async {
@@ -236,7 +353,6 @@ class _PomodoroHomeState extends State<PomodoroHome>
 
   void _loadData() {
     setState(() {
-      // Settings
       workDuration = settingsBox.get('workDuration', defaultValue: 25 * 60);
       shortBreakDuration = settingsBox.get(
         'shortBreakDuration',
@@ -262,24 +378,20 @@ class _PomodoroHomeState extends State<PomodoroHome>
         'selectedSoundIndex',
         defaultValue: 0,
       );
-
-      // Stats - muhim!
+      focusModeEnabled = settingsBox.get(
+        'focusModeEnabled',
+        defaultValue: true,
+      );
       totalPomodoros = statsBox.get('totalPomodoros', defaultValue: 0);
       todayPomodoros = statsBox.get('todayPomodoros', defaultValue: 0);
       totalFocusTime = statsBox.get('totalFocusTime', defaultValue: 0);
+      pomodoroCount = statsBox.get('pomodoroCount', defaultValue: 0);
 
-      // Weekly chart data
       final weeklyData = statsBox.get('weeklyPomodoros');
       if (weeklyData != null && weeklyData is List) {
         weeklyPomodoros = List<int>.from(weeklyData);
-      } else {
-        weeklyPomodoros = [0, 0, 0, 0, 0, 0, 0];
       }
 
-      // Pomodorocount session uchun
-      pomodoroCount = statsBox.get('pomodoroCount', defaultValue: 0);
-
-      // Tasks
       final tasksData = tasksBox.get('tasksList');
       if (tasksData != null && tasksData is List) {
         tasks = tasksData
@@ -290,6 +402,83 @@ class _PomodoroHomeState extends State<PomodoroHome>
       currentSeconds = workDuration;
     });
   }
+
+  void _loadFocusData() {
+    setState(() {
+      focusStreak = focusBox.get('focusStreak', defaultValue: 0);
+      deepWorkSessions = focusBox.get('deepWorkSessions', defaultValue: 0);
+      weeklyGoalPomodoros = focusBox.get(
+        'weeklyGoalPomodoros',
+        defaultValue: 40,
+      );
+      weeklyCompletedPomodoros = focusBox.get(
+        'weeklyCompletedPomodoros',
+        defaultValue: 0,
+      );
+
+      final lastDate = focusBox.get('lastFocusDate');
+      if (lastDate != null) lastFocusDate = DateTime.tryParse(lastDate);
+
+      final goalData = focusBox.get('todayGoal');
+      if (goalData != null) {
+        todayGoal = DailyGoal.fromJson(Map<String, dynamic>.from(goalData));
+        if (!_isSameDay(todayGoal!.date, DateTime.now())) {
+          todayGoal = DailyGoal(date: DateTime.now());
+        }
+      } else {
+        todayGoal = DailyGoal(date: DateTime.now());
+      }
+
+      _checkAndUpdateStreak();
+    });
+  }
+
+  void _loadAnalytics() {
+    final sessionsData = analyticsBox.get('focusSessions');
+    if (sessionsData != null && sessionsData is List) {
+      focusSessions = sessionsData
+          .map((e) => FocusSession.fromJson(Map<String, dynamic>.from(e)))
+          .toList();
+    }
+
+    final heatmap = analyticsBox.get('heatmapData');
+    if (heatmap != null && heatmap is Map) {
+      heatmapData = Map<String, int>.from(heatmap);
+    }
+
+    final hourly = analyticsBox.get('hourlyProductivity');
+    if (hourly != null && hourly is List) {
+      hourlyProductivity = List<int>.from(hourly);
+    }
+
+    totalTasksCompleted = analyticsBox.get(
+      'totalTasksCompleted',
+      defaultValue: 0,
+    );
+    avgFocusTime = analyticsBox.get('avgFocusTime', defaultValue: 0.0);
+  }
+
+  void _checkAndUpdateStreak() {
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+
+    if (lastFocusDate != null) {
+      final lastDate = DateTime(
+        lastFocusDate!.year,
+        lastFocusDate!.month,
+        lastFocusDate!.day,
+      );
+      final diff = today.difference(lastDate).inDays;
+
+      if (diff > 1) {
+        focusStreak = 0;
+        _saveFocusData();
+      }
+    }
+  }
+
+  bool _isSameDay(DateTime a, DateTime b) =>
+      a.year == b.year && a.month == b.month && a.day == b.day;
 
   Future<void> _saveTasks() async =>
       await tasksBox.put('tasksList', tasks.map((t) => t.toJson()).toList());
@@ -306,6 +495,7 @@ class _PomodoroHomeState extends State<PomodoroHome>
     await settingsBox.put('isDark', widget.isDark);
     await settingsBox.put('soundEnabled', soundEnabled);
     await settingsBox.put('selectedSoundIndex', selectedSoundIndex);
+    await settingsBox.put('focusModeEnabled', focusModeEnabled);
   }
 
   Future<void> _saveStats() async {
@@ -316,9 +506,30 @@ class _PomodoroHomeState extends State<PomodoroHome>
     await statsBox.put('pomodoroCount', pomodoroCount);
   }
 
-  void _startTimer() {
+  Future<void> _saveFocusData() async {
+    await focusBox.put('focusStreak', focusStreak);
+    await focusBox.put('deepWorkSessions', deepWorkSessions);
+    await focusBox.put('lastFocusDate', lastFocusDate?.toIso8601String());
+    await focusBox.put('todayGoal', todayGoal?.toJson());
+    await focusBox.put('weeklyGoalPomodoros', weeklyGoalPomodoros);
+    await focusBox.put('weeklyCompletedPomodoros', weeklyCompletedPomodoros);
+  }
+
+  Future<void> _saveAnalytics() async {
+    await analyticsBox.put(
+      'focusSessions',
+      focusSessions.map((s) => s.toJson()).toList(),
+    );
+    await analyticsBox.put('heatmapData', heatmapData);
+    await analyticsBox.put('hourlyProductivity', hourlyProductivity);
+    await analyticsBox.put('totalTasksCompleted', totalTasksCompleted);
+    await analyticsBox.put('avgFocusTime', avgFocusTime);
+  }
+
+  void _startTimer() async {
     if (keepScreenOn) WakelockPlus.enable();
     if (soundEnabled) _playBgSound();
+
     setState(() => isRunning = true);
     timer = Timer.periodic(const Duration(seconds: 1), (t) {
       if (currentSeconds > 0) {
@@ -339,14 +550,13 @@ class _PomodoroHomeState extends State<PomodoroHome>
     }
   }
 
-  void _stopBgSound() async {
-    await bgAudioPlayer.stop();
-  }
+  void _stopBgSound() async => await bgAudioPlayer.stop();
 
-  void _pauseTimer() {
+  void _pauseTimer() async {
     timer?.cancel();
     _stopBgSound();
     if (keepScreenOn) WakelockPlus.disable();
+
     setState(() => isRunning = false);
   }
 
@@ -366,6 +576,7 @@ class _PomodoroHomeState extends State<PomodoroHome>
     timer?.cancel();
     _stopBgSound();
     if (keepScreenOn) WakelockPlus.disable();
+
     if (!isBreak) _confettiController.play();
 
     if (enableVibration) {
@@ -390,17 +601,74 @@ class _PomodoroHomeState extends State<PomodoroHome>
     }
 
     if (!isBreak) {
+      final now = DateTime.now();
       pomodoroCount++;
       totalPomodoros++;
       todayPomodoros++;
       totalFocusTime += workDuration;
-      weeklyPomodoros[DateTime.now().weekday - 1]++;
+      weeklyPomodoros[now.weekday - 1]++;
+      weeklyCompletedPomodoros++;
+
+      // Update daily goal
+      todayGoal!.completedPomodoros++;
+      todayGoal!.completedMinutes += workDuration ~/ 60;
+
+      // Update streak
+      if (lastFocusDate == null || !_isSameDay(lastFocusDate!, now)) {
+        if (lastFocusDate != null) {
+          final diff = DateTime(now.year, now.month, now.day)
+              .difference(
+                DateTime(
+                  lastFocusDate!.year,
+                  lastFocusDate!.month,
+                  lastFocusDate!.day,
+                ),
+              )
+              .inDays;
+          if (diff == 1)
+            focusStreak++;
+          else if (diff > 1)
+            focusStreak = 1;
+        } else {
+          focusStreak = 1;
+        }
+      }
+      lastFocusDate = now;
+
+      // Deep work check (4+ consecutive pomodoros)
+      if (pomodoroCount > 0 && pomodoroCount % 4 == 0) {
+        deepWorkSessions++;
+      }
+
+      // Analytics
+      final dateKey =
+          '${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
+      heatmapData[dateKey] = (heatmapData[dateKey] ?? 0) + 1;
+      hourlyProductivity[now.hour]++;
+
+      focusSessions.add(
+        FocusSession(
+          date: now,
+          hour: now.hour,
+          minutes: workDuration ~/ 60,
+          pomodoros: 1,
+          isDeepWork: pomodoroCount % 4 == 0,
+        ),
+      );
+
+      // Update average focus time
+      final totalSessions = focusSessions.length;
+      avgFocusTime = totalFocusTime / 60 / max(1, totalSessions);
+
       if (currentTask != null) {
         currentTask!.pomodorosCompleted++;
         if (currentSubTask != null) currentSubTask!.isCompleted = true;
       }
+
       await _saveStats();
       await _saveTasks();
+      await _saveFocusData();
+      await _saveAnalytics();
     }
 
     setState(() {
@@ -447,8 +715,26 @@ class _PomodoroHomeState extends State<PomodoroHome>
     });
   }
 
+  int getProductivityScore() {
+    if (todayGoal == null) return 0;
+    double pomScore = todayGoal!.pomodoroProgress * 40;
+    double timeScore = todayGoal!.minutesProgress * 30;
+    double streakScore = min(focusStreak, 7) / 7 * 20;
+    double deepScore = min(deepWorkSessions, 5) / 5 * 10;
+    return (pomScore + timeScore + streakScore + deepScore).round().clamp(
+      0,
+      100,
+    );
+  }
+
+  double getTaskCompletionRate() {
+    if (tasks.isEmpty) return 0;
+    return tasks.where((t) => t.isCompleted).length / tasks.length;
+  }
+
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     timer?.cancel();
     _confettiController.dispose();
     bgAudioPlayer.dispose();
@@ -470,9 +756,9 @@ class _PomodoroHomeState extends State<PomodoroHome>
       ? Colors.white.withOpacity(0.1)
       : Colors.white.withOpacity(0.8);
 
-  Color get _borderColor => !widget.isDark
-      ? Colors.black.withOpacity(0.1)
-      : Colors.white.withOpacity(0.2);
+  Color get _borderColor => widget.isDark
+      ? Colors.white.withOpacity(0.2)
+      : Colors.black.withOpacity(0.1);
 
   @override
   Widget build(BuildContext context) {
@@ -495,7 +781,7 @@ class _PomodoroHomeState extends State<PomodoroHome>
               children: [
                 _buildTimerPage(),
                 _buildTasksPage(),
-                _buildStatsPage(),
+                _buildAnalyticsPage(),
                 _buildSettingsPage(),
               ],
             ),
@@ -508,21 +794,19 @@ class _PomodoroHomeState extends State<PomodoroHome>
               confettiController: _confettiController,
               blastDirectionality: BlastDirectionality.explosive,
               emissionFrequency: 0.1,
-              numberOfParticles: 60,
-              maxBlastForce: 120,
-              minBlastForce: 50,
-              createParticlePath: createMixedParticles,
-              gravity: 0.2,
-              shouldLoop: false,
+              numberOfParticles: 40,
+              maxBlastForce: 150,
+              minBlastForce: 80,
+              gravity: 0.1,
               colors: const [
-                Colors.green,
-                Colors.blue,
-                Colors.pink,
-                Colors.orange,
-                Colors.purple,
-                Colors.yellow,
                 Colors.red,
+                Colors.yellow,
+                Colors.orange,
+                Colors.pink,
+                Colors.blue,
+                Colors.purple,
               ],
+              createParticlePath: createMixedParticles,
             ),
           ),
         ],
@@ -530,115 +814,490 @@ class _PomodoroHomeState extends State<PomodoroHome>
     );
   }
 
+  // ==================== TIMER PAGE ====================
   Widget _buildTimerPage() {
     if (isFullscreenMode) return _buildFullscreenTimer();
     final progress = 1 - (currentSeconds / _getCurrentDuration());
 
-    return Column(
-      children: [
-        const SizedBox(height: 20),
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 20),
-          child: _buildGlassCard(
-            child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: Column(
-                children: [
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Text(
-                        isBreak ? 'Break Time' : 'Focus Time',
-                        style: TextStyle(
-                          fontSize: 22,
-                          letterSpacing: 2,
-                          color: _textColor,
+    return SingleChildScrollView(
+      child: Column(
+        children: [
+          const SizedBox(height: 15),
+          _buildFocusStatsBar(),
+          const SizedBox(height: 15),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 20),
+            child: _buildGlassCard(
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  children: [
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Text(
+                          isBreak ? 'Break Time' : 'Focus Time',
+                          style: TextStyle(
+                            fontSize: 22,
+                            letterSpacing: 2,
+                            color: _textColor,
+                          ),
                         ),
-                      ),
-                      _buildGlassButton(
-                        icon: Icons.fullscreen,
-                        onTap: () => setState(() => isFullscreenMode = true),
-                        size: 40,
-                        iconSize: 20,
+                        _buildGlassButton(
+                          icon: Icons.fullscreen,
+                          onTap: () => setState(() => isFullscreenMode = true),
+                          size: 40,
+                          iconSize: 20,
+                        ),
+                      ],
+                    ),
+                    if (currentTask != null) ...[
+                      const SizedBox(height: 8),
+                      Text(
+                        currentTask!.title,
+                        style: TextStyle(fontSize: 16, color: _textSecondary),
                       ),
                     ],
-                  ),
-                  if (currentTask != null) ...[
-                    const SizedBox(height: 8),
-                    Text(
-                      currentTask!.title,
-                      style: TextStyle(fontSize: 16, color: _textSecondary),
-                    ),
-                  ],
-                  if (currentSubTask != null)
-                    Text(
-                      '→ ${currentSubTask!.title}',
-                      style: TextStyle(
-                        fontSize: 14,
-                        color: _textSecondary.withOpacity(0.8),
+                    if (currentSubTask != null)
+                      Text(
+                        '→ ${currentSubTask!.title}',
+                        style: TextStyle(
+                          fontSize: 14,
+                          color: _textSecondary.withOpacity(0.8),
+                        ),
                       ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 25),
+          SizedBox(
+            width: 240,
+            height: 240,
+            child: LiquidCircularProgressIndicator(
+              value: progress.clamp(0.0, 1.0),
+              valueColor: AlwaysStoppedAnimation(
+                isBreak ? Colors.greenAccent : Colors.orangeAccent,
+              ),
+              backgroundColor: _cardBg,
+              borderColor: _borderColor,
+              borderWidth: 5,
+              direction: Axis.vertical,
+              center: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    _formatTime(currentSeconds),
+                    style: TextStyle(
+                      fontSize: 44,
+                      fontWeight: FontWeight.w300,
+                      letterSpacing: 4,
+                      color: _textColor,
                     ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    'Pomodoro ${pomodoroCount + 1}',
+                    style: TextStyle(fontSize: 14, color: _textSecondary),
+                  ),
                 ],
               ),
             ),
           ),
-        ),
-        const SizedBox(height: 30),
-        SizedBox(
-          width: 260,
-          height: 260,
-          child: LiquidCircularProgressIndicator(
-            value: progress.clamp(0.0, 1.0),
-            valueColor: AlwaysStoppedAnimation(
-              isBreak ? Colors.greenAccent : Colors.orangeAccent,
-            ),
-            backgroundColor: _cardBg,
-            borderColor: _borderColor,
-            borderWidth: 5,
-            direction: Axis.vertical,
-            center: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  _formatTime(currentSeconds),
-                  style: TextStyle(
-                    fontSize: 48,
-                    fontWeight: FontWeight.w300,
-                    letterSpacing: 4,
-                    color: _textColor,
-                  ),
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  'Pomodoro ${pomodoroCount + 1}',
-                  style: TextStyle(fontSize: 14, color: _textSecondary),
-                ),
-              ],
-            ),
+          const SizedBox(height: 25),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              _buildGlassButton(icon: Icons.skip_next, onTap: _skipSession),
+              const SizedBox(width: 20),
+              _buildGlassButton(
+                icon: isRunning ? Icons.pause : Icons.play_arrow,
+                onTap: isRunning ? _pauseTimer : _startTimer,
+                size: 80,
+                iconSize: 40,
+              ),
+              const SizedBox(width: 20),
+              _buildGlassButton(icon: Icons.refresh, onTap: _resetTimer),
+            ],
           ),
-        ),
-        const SizedBox(height: 30),
-        Row(
-          mainAxisAlignment: MainAxisAlignment.center,
+          const SizedBox(height: 15),
+          _buildSoundControls(),
+          const SizedBox(height: 15),
+          _buildDailyGoalProgress(),
+          const SizedBox(height: 15),
+          _buildQuickStats(),
+          const SizedBox(height: 100),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildFocusStatsBar() {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 20),
+      child: Row(
+        children: [
+          Expanded(child: _buildMiniStat('🔥', '$focusStreak', 'Streak')),
+          const SizedBox(width: 10),
+          Expanded(
+            child: _buildMiniStat('🎯', '${getProductivityScore()}', 'Score'),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: _buildMiniStat('💪', '$deepWorkSessions', 'Deep Work'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildMiniStat(String emoji, String value, String label) {
+    return _buildGlassCard(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 8),
+        child: Column(
           children: [
-            _buildGlassButton(icon: Icons.skip_next, onTap: _skipSession),
-            const SizedBox(width: 20),
-            _buildGlassButton(
-              icon: isRunning ? Icons.pause : Icons.play_arrow,
-              onTap: isRunning ? _pauseTimer : _startTimer,
-              size: 80,
-              iconSize: 40,
+            Text(emoji, style: const TextStyle(fontSize: 18)),
+            const SizedBox(height: 4),
+            Text(
+              value,
+              style: TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+                color: _textColor,
+              ),
             ),
-            const SizedBox(width: 20),
-            _buildGlassButton(icon: Icons.refresh, onTap: _resetTimer),
+            Text(label, style: TextStyle(fontSize: 10, color: _textSecondary)),
           ],
         ),
-        const SizedBox(height: 20),
-        _buildSoundControls(),
-        const Spacer(),
-        _buildQuickStats(),
-        const SizedBox(height: 100),
+      ),
+    );
+  }
+
+  Widget _buildDailyGoalProgress() {
+    if (todayGoal == null) return const SizedBox();
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 20),
+      child: _buildGlassCard(
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text(
+                    'Daily Goal',
+                    style: TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w600,
+                      color: _textColor,
+                    ),
+                  ),
+                  GestureDetector(
+                    onTap: _showGoalSettingsDialog,
+                    child: Icon(
+                      Icons.settings,
+                      size: 18,
+                      color: _textSecondary,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Pomodoros: ${todayGoal!.completedPomodoros}/${todayGoal!.targetPomodoros}',
+                          style: TextStyle(fontSize: 12, color: _textSecondary),
+                        ),
+                        const SizedBox(height: 4),
+                        LinearProgressIndicator(
+                          value: todayGoal!.pomodoroProgress,
+                          backgroundColor: _borderColor,
+                          valueColor: AlwaysStoppedAnimation(
+                            Colors.orangeAccent,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 20),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Minutes: ${todayGoal!.completedMinutes}/${todayGoal!.targetMinutes}',
+                          style: TextStyle(fontSize: 12, color: _textSecondary),
+                        ),
+                        const SizedBox(height: 4),
+                        LinearProgressIndicator(
+                          value: todayGoal!.minutesProgress,
+                          backgroundColor: _borderColor,
+                          valueColor: AlwaysStoppedAnimation(
+                            Colors.greenAccent,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              Text(
+                'Weekly: $weeklyCompletedPomodoros/$weeklyGoalPomodoros pomodoros',
+                style: TextStyle(fontSize: 12, color: _textSecondary),
+              ),
+              const SizedBox(height: 4),
+              LinearProgressIndicator(
+                value: weeklyGoalPomodoros > 0
+                    ? (weeklyCompletedPomodoros / weeklyGoalPomodoros).clamp(
+                        0.0,
+                        1.0,
+                      )
+                    : 0,
+                backgroundColor: _borderColor,
+                valueColor: AlwaysStoppedAnimation(Colors.purpleAccent),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _showGoalSettingsDialog() {
+    int dailyPom = todayGoal?.targetPomodoros ?? 8;
+    int dailyMin = todayGoal?.targetMinutes ?? 200;
+    int weeklyPom = weeklyGoalPomodoros;
+
+    showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setD) => AlertDialog(
+          backgroundColor: widget.isDark
+              ? const Color(0xFF1A0B5E)
+              : Colors.white,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(20),
+          ),
+          title: Text('Goal Settings', style: TextStyle(color: _textColor)),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              _buildGoalSlider(
+                'Daily Pomodoros',
+                dailyPom,
+                1,
+                20,
+                (v) => setD(() => dailyPom = v),
+              ),
+              _buildGoalSlider(
+                'Daily Minutes',
+                dailyMin,
+                30,
+                480,
+                (v) => setD(() => dailyMin = v),
+              ),
+              _buildGoalSlider(
+                'Weekly Pomodoros',
+                weeklyPom,
+                10,
+                100,
+                (v) => setD(() => weeklyPom = v),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: Text('Cancel', style: TextStyle(color: _textSecondary)),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                setState(() {
+                  todayGoal!.targetPomodoros = dailyPom;
+                  todayGoal!.targetMinutes = dailyMin;
+                  weeklyGoalPomodoros = weeklyPom;
+                });
+                _saveFocusData();
+                Navigator.pop(ctx);
+              },
+              style: ElevatedButton.styleFrom(
+                backgroundColor: _cardBg,
+                foregroundColor: _textColor,
+              ),
+              child: const Text('Save'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildGoalSlider(
+    String label,
+    int value,
+    int min,
+    int max,
+    Function(int) onChanged,
+  ) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          '$label: $value',
+          style: TextStyle(color: _textSecondary, fontSize: 14),
+        ),
+        Slider(
+          value: value.toDouble(),
+          min: min.toDouble(),
+          max: max.toDouble(),
+          divisions: max - min,
+          onChanged: (v) => onChanged(v.round()),
+          activeColor: _textColor,
+        ),
       ],
+    );
+  }
+
+  Widget _buildFullscreenTimer() {
+    final progress = 1 - (currentSeconds / _getCurrentDuration());
+    return GestureDetector(
+      onTap: () => setState(() => isFullscreenMode = false),
+      child: Container(
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [_bgStart, _bgMid, _bgStart],
+          ),
+        ),
+        child: Stack(
+          children: [
+            Center(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  SizedBox(
+                    width: 280,
+                    height: 280,
+                    child: LiquidCircularProgressIndicator(
+                      value: progress.clamp(0.0, 1.0),
+                      valueColor: AlwaysStoppedAnimation(
+                        isBreak ? Colors.greenAccent : Colors.orangeAccent,
+                      ),
+                      backgroundColor: _cardBg,
+                      borderColor: _borderColor,
+                      borderWidth: 4,
+                      direction: Axis.vertical,
+                      center: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            _formatTime(currentSeconds),
+                            style: TextStyle(
+                              fontSize: 52,
+                              fontWeight: FontWeight.w300,
+                              letterSpacing: 4,
+                              color: _textColor,
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          Text(
+                            isBreak ? 'BREAK' : 'FOCUS',
+                            style: TextStyle(
+                              fontSize: 16,
+                              color: _textSecondary,
+                              letterSpacing: 3,
+                            ),
+                          ),
+                          if (currentTask != null) ...[
+                            const SizedBox(height: 12),
+                            Text(
+                              currentTask!.title,
+                              style: TextStyle(
+                                fontSize: 14,
+                                color: _textSecondary,
+                              ),
+                              textAlign: TextAlign.center,
+                            ),
+                          ],
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 40),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      _buildGlassButton(
+                        icon: Icons.skip_next,
+                        onTap: _skipSession,
+                        size: 60,
+                        iconSize: 28,
+                      ),
+                      const SizedBox(width: 20),
+                      _buildGlassButton(
+                        icon: isRunning ? Icons.pause : Icons.play_arrow,
+                        onTap: isRunning ? _pauseTimer : _startTimer,
+                        size: 80,
+                        iconSize: 40,
+                      ),
+                      const SizedBox(width: 20),
+                      _buildGlassButton(
+                        icon: Icons.refresh,
+                        onTap: _resetTimer,
+                        size: 60,
+                        iconSize: 28,
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+            Positioned(
+              top: 40,
+              right: 20,
+              child: _buildGlassButton(
+                icon: Icons.fullscreen_exit,
+                onTap: () => setState(() => isFullscreenMode = false),
+                size: 50,
+                iconSize: 24,
+              ),
+            ),
+            Positioned(
+              top: 40,
+              left: 20,
+              child: _buildGlassCard(
+                child: Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: Row(
+                    children: [
+                      Text(
+                        '🔥 $focusStreak',
+                        style: TextStyle(fontSize: 14, color: _textColor),
+                      ),
+                      const SizedBox(width: 10),
+                      Text(
+                        'Pom ${pomodoroCount + 1}',
+                        style: TextStyle(fontSize: 14, color: _textSecondary),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 
@@ -699,9 +1358,9 @@ class _PomodoroHomeState extends State<PomodoroHome>
   }
 
   void _showSoundPicker() {
-    final FixedExtentScrollController scrollController =
-        FixedExtentScrollController(initialItem: selectedSoundIndex);
-
+    final controller = FixedExtentScrollController(
+      initialItem: selectedSoundIndex,
+    );
     showModalBottomSheet(
       context: context,
       backgroundColor: Colors.transparent,
@@ -734,13 +1393,13 @@ class _PomodoroHomeState extends State<PomodoroHome>
             const SizedBox(height: 10),
             Expanded(
               child: ListWheelScrollView.useDelegate(
-                controller: scrollController,
+                controller: controller,
                 itemExtent: 50,
                 perspective: 0.005,
                 diameterRatio: 1.5,
                 physics: const FixedExtentScrollPhysics(),
-                onSelectedItemChanged: (index) {
-                  setState(() => selectedSoundIndex = index);
+                onSelectedItemChanged: (i) {
+                  setState(() => selectedSoundIndex = i);
                   _saveSettings();
                   if (soundEnabled && isRunning) {
                     _stopBgSound();
@@ -749,23 +1408,20 @@ class _PomodoroHomeState extends State<PomodoroHome>
                 },
                 childDelegate: ListWheelChildBuilderDelegate(
                   childCount: soundNames.length,
-                  builder: (ctx, index) {
-                    final isSelected = index == selectedSoundIndex;
-                    return Center(
-                      child: Text(
-                        soundNames[index],
-                        style: TextStyle(
-                          fontSize: isSelected ? 20 : 16,
-                          fontWeight: isSelected
-                              ? FontWeight.bold
-                              : FontWeight.normal,
-                          color: isSelected
-                              ? _textColor
-                              : _textSecondary.withOpacity(0.5),
-                        ),
+                  builder: (ctx, i) => Center(
+                    child: Text(
+                      soundNames[i],
+                      style: TextStyle(
+                        fontSize: i == selectedSoundIndex ? 20 : 16,
+                        fontWeight: i == selectedSoundIndex
+                            ? FontWeight.bold
+                            : FontWeight.normal,
+                        color: i == selectedSoundIndex
+                            ? _textColor
+                            : _textSecondary.withOpacity(0.5),
                       ),
-                    );
-                  },
+                    ),
+                  ),
                 ),
               ),
             ),
@@ -790,132 +1446,9 @@ class _PomodoroHomeState extends State<PomodoroHome>
     );
   }
 
-  Widget _buildFullscreenTimer() {
-    final progress = 1 - (currentSeconds / _getCurrentDuration());
-    return GestureDetector(
-      onTap: () => setState(() => isFullscreenMode = false),
-      child: Container(
-        decoration: BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-            colors: [_bgStart, _bgMid, _bgStart],
-          ),
-        ),
-        child: Stack(
-          children: [
-            Center(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  SizedBox(
-                    width: 300,
-                    height: 300,
-                    child: LiquidCircularProgressIndicator(
-                      value: progress.clamp(0.0, 1.0),
-                      valueColor: AlwaysStoppedAnimation(
-                        isBreak ? Colors.greenAccent : Colors.orangeAccent,
-                      ),
-                      backgroundColor: _cardBg,
-                      borderColor: _borderColor,
-                      borderWidth: 4,
-                      direction: Axis.vertical,
-                      center: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Text(
-                            _formatTime(currentSeconds),
-                            style: TextStyle(
-                              fontSize: 56,
-                              fontWeight: FontWeight.w300,
-                              letterSpacing: 4,
-                              color: _textColor,
-                            ),
-                          ),
-                          const SizedBox(height: 8),
-                          Text(
-                            isBreak ? 'BREAK' : 'FOCUS',
-                            style: TextStyle(
-                              fontSize: 16,
-                              color: _textSecondary,
-                              letterSpacing: 3,
-                            ),
-                          ),
-                          if (currentTask != null) ...[
-                            const SizedBox(height: 12),
-                            Text(
-                              currentTask!.title,
-                              style: TextStyle(
-                                fontSize: 16,
-                                color: _textSecondary,
-                              ),
-                              textAlign: TextAlign.center,
-                            ),
-                          ],
-                        ],
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 40),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      _buildGlassButton(
-                        icon: Icons.skip_next,
-                        onTap: _skipSession,
-                        size: 60,
-                        iconSize: 28,
-                      ),
-                      const SizedBox(width: 20),
-                      _buildGlassButton(
-                        icon: isRunning ? Icons.pause : Icons.play_arrow,
-                        onTap: isRunning ? _pauseTimer : _startTimer,
-                        size: 80,
-                        iconSize: 40,
-                      ),
-                      const SizedBox(width: 20),
-                      _buildGlassButton(
-                        icon: Icons.refresh,
-                        onTap: _resetTimer,
-                        size: 60,
-                        iconSize: 28,
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-            ),
-            Positioned(
-              top: 40,
-              right: 20,
-              child: _buildGlassButton(
-                icon: Icons.fullscreen_exit,
-                onTap: () => setState(() => isFullscreenMode = false),
-                size: 50,
-                iconSize: 24,
-              ),
-            ),
-            Positioned(
-              top: 40,
-              left: 20,
-              child: _buildGlassCard(
-                child: Padding(
-                  padding: const EdgeInsets.all(12),
-                  child: Text(
-                    'Pomodoro ${pomodoroCount + 1}',
-                    style: TextStyle(fontSize: 14, color: _textSecondary),
-                  ),
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
+  // ==================== TASKS PAGE ====================
   Widget _buildTasksPage() {
-    final filteredTasks = selectedCategory == 'All'
+    final filtered = selectedCategory == 'All'
         ? tasks
         : tasks.where((t) => t.category == selectedCategory).toList();
     return Column(
@@ -936,34 +1469,37 @@ class _PomodoroHomeState extends State<PomodoroHome>
           scrollDirection: Axis.horizontal,
           padding: const EdgeInsets.symmetric(horizontal: 20),
           child: Row(
-            children: categories.map((cat) {
-              final isSelected = cat == selectedCategory;
-              return Padding(
-                padding: const EdgeInsets.only(right: 10),
-                child: GestureDetector(
-                  onTap: () => setState(() => selectedCategory = cat),
-                  child: _buildGlassCard(
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 20,
-                        vertical: 10,
-                      ),
-                      child: Text(
-                        cat,
-                        style: TextStyle(
-                          color: isSelected ? _textColor : _textSecondary,
+            children: categories
+                .map(
+                  (c) => Padding(
+                    padding: const EdgeInsets.only(right: 10),
+                    child: GestureDetector(
+                      onTap: () => setState(() => selectedCategory = c),
+                      child: _buildGlassCard(
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 20,
+                            vertical: 10,
+                          ),
+                          child: Text(
+                            c,
+                            style: TextStyle(
+                              color: c == selectedCategory
+                                  ? _textColor
+                                  : _textSecondary,
+                            ),
+                          ),
                         ),
                       ),
                     ),
                   ),
-                ),
-              );
-            }).toList(),
+                )
+                .toList(),
           ),
         ),
         const SizedBox(height: 20),
         Expanded(
-          child: filteredTasks.isEmpty
+          child: filtered.isEmpty
               ? Center(
                   child: Column(
                     mainAxisAlignment: MainAxisAlignment.center,
@@ -978,20 +1514,13 @@ class _PomodoroHomeState extends State<PomodoroHome>
                         'No tasks yet',
                         style: TextStyle(color: _textSecondary, fontSize: 18),
                       ),
-                      const SizedBox(height: 8),
-                      Text(
-                        'Tap + to add your first task',
-                        style: TextStyle(
-                          color: _textSecondary.withOpacity(0.6),
-                        ),
-                      ),
                     ],
                   ),
                 )
               : ListView.builder(
                   padding: const EdgeInsets.fromLTRB(20, 0, 20, 100),
-                  itemCount: filteredTasks.length,
-                  itemBuilder: (ctx, i) => _buildTaskCard(filteredTasks[i]),
+                  itemCount: filtered.length,
+                  itemBuilder: (ctx, i) => _buildTaskCard(filtered[i]),
                 ),
         ),
       ],
@@ -1016,7 +1545,11 @@ class _PomodoroHomeState extends State<PomodoroHome>
                       onTap: () {
                         setState(() {
                           task.isCompleted = !task.isCompleted;
-                          if (task.isCompleted) _confettiController.play();
+                          if (task.isCompleted) {
+                            _confettiController.play();
+                            totalTasksCompleted++;
+                            _saveAnalytics();
+                          }
                         });
                         _saveTasks();
                       },
@@ -1096,95 +1629,368 @@ class _PomodoroHomeState extends State<PomodoroHome>
     );
   }
 
-  Widget _buildStatsPage() {
+  // ==================== ANALYTICS PAGE ====================
+  Widget _buildAnalyticsPage() {
     return ListView(
       padding: const EdgeInsets.fromLTRB(20, 20, 20, 100),
       children: [
-        Text('Statistics', style: TextStyle(fontSize: 28, color: _textColor)),
-        const SizedBox(height: 30),
-        _buildGlassCard(
-          child: Padding(
-            padding: const EdgeInsets.all(20),
-            child: Column(
-              children: [
-                _buildStatRow('Total Pomodoros', totalPomodoros.toString()),
-                Divider(height: 30, color: _borderColor),
-                _buildStatRow('Today Pomodoros', todayPomodoros.toString()),
-                Divider(height: 30, color: _borderColor),
-                _buildStatRow(
-                  'Total Focus Time',
-                  '${(totalFocusTime / 3600).toStringAsFixed(1)}h',
-                ),
-                Divider(height: 30, color: _borderColor),
-                _buildStatRow(
-                  'Tasks Completed',
-                  tasks.where((t) => t.isCompleted).length.toString(),
-                ),
-                Divider(height: 30, color: _borderColor),
-                _buildStatRow(
-                  'Active Tasks',
-                  tasks.where((t) => !t.isCompleted).length.toString(),
-                ),
-              ],
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Text(
+              'Analytics',
+              style: TextStyle(fontSize: 28, color: _textColor),
             ),
-          ),
+            GestureDetector(
+              child: Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: _cardBg,
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Icon(Icons.download, color: _textColor, size: 24),
+              ),
+            ),
+          ],
         ),
         const SizedBox(height: 20),
-        _buildGlassCard(
-          child: Padding(
-            padding: const EdgeInsets.all(20),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'Categories',
-                  style: TextStyle(
-                    fontSize: 18,
-                    letterSpacing: 1,
-                    color: _textColor,
+        _buildProductivityScoreCard(),
+        const SizedBox(height: 20),
+        _buildStatsOverview(),
+        const SizedBox(height: 20),
+        _buildHeatmapCalendar(),
+        const SizedBox(height: 20),
+        _buildHourlyProductivityChart(),
+        const SizedBox(height: 20),
+        _buildWeeklyChart(),
+        const SizedBox(height: 20),
+      ],
+    );
+  }
+
+  Widget _buildProductivityScoreCard() {
+    final score = getProductivityScore();
+    Color scoreColor = score >= 80
+        ? Colors.greenAccent
+        : score >= 50
+        ? Colors.orangeAccent
+        : Colors.redAccent;
+    String scoreLabel = score >= 80
+        ? 'Excellent!'
+        : score >= 50
+        ? 'Good'
+        : 'Keep Going!';
+
+    return _buildGlassCard(
+      child: Padding(
+        padding: const EdgeInsets.all(20),
+        child: Row(
+          children: [
+            SizedBox(
+              width: 100,
+              height: 100,
+              child: Stack(
+                alignment: Alignment.center,
+                children: [
+                  CircularProgressIndicator(
+                    value: score / 100,
+                    strokeWidth: 8,
+                    backgroundColor: _borderColor,
+                    valueColor: AlwaysStoppedAnimation(scoreColor),
                   ),
-                ),
-                const SizedBox(height: 20),
-                ...categories
-                    .skip(1)
-                    .map(
-                      (cat) => Padding(
-                        padding: const EdgeInsets.only(bottom: 10),
-                        child: _buildStatRow(
-                          cat,
-                          tasks
-                              .where((t) => t.category == cat)
-                              .length
-                              .toString(),
+                  Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        '$score',
+                        style: TextStyle(
+                          fontSize: 28,
+                          fontWeight: FontWeight.bold,
+                          color: _textColor,
                         ),
                       ),
-                    ),
-              ],
+                      Text(
+                        'Score',
+                        style: TextStyle(fontSize: 12, color: _textSecondary),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
             ),
-          ),
+            const SizedBox(width: 20),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    scoreLabel,
+                    style: TextStyle(
+                      fontSize: 20,
+                      fontWeight: FontWeight.bold,
+                      color: scoreColor,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Based on your daily goals, streak, and deep work sessions',
+                    style: TextStyle(fontSize: 12, color: _textSecondary),
+                  ),
+                ],
+              ),
+            ),
+          ],
         ),
-        const SizedBox(height: 20),
-        _buildGlassCard(
-          child: Padding(
-            padding: const EdgeInsets.all(20),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+      ),
+    );
+  }
+
+  Widget _buildStatsOverview() {
+    final rate = getTaskCompletionRate();
+    return _buildGlassCard(
+      child: Padding(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          children: [
+            _buildStatRow('Total Pomodoros', '$totalPomodoros'),
+            Divider(height: 25, color: _borderColor),
+            _buildStatRow('Today Pomodoros', '$todayPomodoros'),
+            Divider(height: 25, color: _borderColor),
+            _buildStatRow(
+              'Total Focus Time',
+              '${(totalFocusTime / 3600).toStringAsFixed(1)}h',
+            ),
+            Divider(height: 25, color: _borderColor),
+            _buildStatRow(
+              'Avg Session',
+              '${avgFocusTime.toStringAsFixed(1)} min',
+            ),
+            Divider(height: 25, color: _borderColor),
+            _buildStatRow(
+              'Task Completion',
+              '${(rate * 100).toStringAsFixed(0)}%',
+            ),
+            Divider(height: 25, color: _borderColor),
+            _buildStatRow('Focus Streak', '$focusStreak days'),
+            Divider(height: 25, color: _borderColor),
+            _buildStatRow('Deep Work Sessions', '$deepWorkSessions'),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildHeatmapCalendar() {
+    final now = DateTime.now();
+    final daysInMonth = DateTime(now.year, now.month + 1, 0).day;
+
+    return _buildGlassCard(
+      child: Padding(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Activity Heatmap - ${_getMonthName(now.month)}',
+              style: TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.w600,
+                color: _textColor,
+              ),
+            ),
+            const SizedBox(height: 15),
+            GridView.builder(
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                crossAxisCount: 7,
+                mainAxisSpacing: 4,
+                crossAxisSpacing: 4,
+              ),
+              itemCount: daysInMonth,
+              itemBuilder: (ctx, i) {
+                final day = i + 1;
+                final dateKey =
+                    '${now.year}-${now.month.toString().padLeft(2, '0')}-${day.toString().padLeft(2, '0')}';
+                final count = heatmapData[dateKey] ?? 0;
+                final intensity = count == 0 ? 0.0 : min(count / 8, 1.0);
+
+                return Container(
+                  decoration: BoxDecoration(
+                    color: count == 0
+                        ? _borderColor
+                        : Colors.greenAccent.withOpacity(0.3 + intensity * 0.7),
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                  child: Center(
+                    child: Text(
+                      '$day',
+                      style: TextStyle(
+                        fontSize: 10,
+                        color: count > 0 ? Colors.white : _textSecondary,
+                      ),
+                    ),
+                  ),
+                );
+              },
+            ),
+            const SizedBox(height: 10),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.end,
               children: [
                 Text(
-                  'Weekly Progress',
-                  style: TextStyle(
-                    fontSize: 18,
-                    letterSpacing: 1,
-                    color: _textColor,
+                  'Less',
+                  style: TextStyle(fontSize: 10, color: _textSecondary),
+                ),
+                const SizedBox(width: 5),
+                ...List.generate(
+                  5,
+                  (i) => Container(
+                    width: 12,
+                    height: 12,
+                    margin: const EdgeInsets.only(right: 2),
+                    decoration: BoxDecoration(
+                      color: i == 0
+                          ? _borderColor
+                          : Colors.greenAccent.withOpacity(0.3 + (i / 4) * 0.7),
+                      borderRadius: BorderRadius.circular(2),
+                    ),
                   ),
                 ),
-                const SizedBox(height: 20),
-                SizedBox(height: 200, child: _buildWeeklyChart()),
+                const SizedBox(width: 5),
+                Text(
+                  'More',
+                  style: TextStyle(fontSize: 10, color: _textSecondary),
+                ),
               ],
             ),
-          ),
+          ],
         ),
-      ],
+      ),
+    );
+  }
+
+  String _getMonthName(int month) {
+    const months = [
+      'Jan',
+      'Feb',
+      'Mar',
+      'Apr',
+      'May',
+      'Jun',
+      'Jul',
+      'Aug',
+      'Sep',
+      'Oct',
+      'Nov',
+      'Dec',
+    ];
+    return months[month - 1];
+  }
+
+  Widget _buildHourlyProductivityChart() {
+    final maxVal = hourlyProductivity.reduce(max).toDouble();
+
+    return _buildGlassCard(
+      child: Padding(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Most Productive Hours',
+              style: TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.w600,
+                color: _textColor,
+              ),
+            ),
+            const SizedBox(height: 15),
+            SizedBox(
+              height: 150,
+              child: BarChart(
+                BarChartData(
+                  alignment: BarChartAlignment.spaceAround,
+                  maxY: maxVal > 0 ? maxVal + 2 : 10,
+                  barTouchData: BarTouchData(enabled: true),
+                  titlesData: FlTitlesData(
+                    show: true,
+                    bottomTitles: AxisTitles(
+                      sideTitles: SideTitles(
+                        showTitles: true,
+                        reservedSize: 30,
+                        getTitlesWidget: (v, m) => v.toInt() % 4 == 0
+                            ? Text(
+                                '${v.toInt()}h',
+                                style: TextStyle(
+                                  fontSize: 10,
+                                  color: _textSecondary,
+                                ),
+                              )
+                            : const SizedBox(),
+                      ),
+                    ),
+                    leftTitles: AxisTitles(
+                      sideTitles: SideTitles(showTitles: false),
+                    ),
+                    topTitles: const AxisTitles(
+                      sideTitles: SideTitles(showTitles: false),
+                    ),
+                    rightTitles: const AxisTitles(
+                      sideTitles: SideTitles(showTitles: false),
+                    ),
+                  ),
+                  gridData: FlGridData(show: false),
+                  borderData: FlBorderData(show: false),
+                  barGroups: List.generate(
+                    24,
+                    (i) => BarChartGroupData(
+                      x: i,
+                      barRods: [
+                        BarChartRodData(
+                          toY: hourlyProductivity[i].toDouble(),
+                          width: 8,
+                          borderRadius: BorderRadius.circular(4),
+                          color: _getHourColor(i),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(height: 10),
+            _buildBestHoursText(),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Color _getHourColor(int hour) {
+    if (hour >= 6 && hour < 12) return Colors.orangeAccent;
+    if (hour >= 12 && hour < 18) return Colors.blueAccent;
+    if (hour >= 18 && hour < 22) return Colors.purpleAccent;
+    return Colors.grey;
+  }
+
+  Widget _buildBestHoursText() {
+    int bestHour = 0;
+    int bestCount = 0;
+    for (int i = 0; i < 24; i++) {
+      if (hourlyProductivity[i] > bestCount) {
+        bestCount = hourlyProductivity[i];
+        bestHour = i;
+      }
+    }
+    if (bestCount == 0)
+      return Text(
+        'Start focusing to see your best hours!',
+        style: TextStyle(fontSize: 12, color: _textSecondary),
+      );
+    return Text(
+      '🏆 Your most productive hour: ${bestHour}:00 - ${bestHour + 1}:00',
+      style: TextStyle(fontSize: 12, color: Colors.greenAccent),
     );
   }
 
