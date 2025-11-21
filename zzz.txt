@@ -1,0 +1,1603 @@
+import 'dart:async';
+import 'dart:math';
+import 'dart:ui';
+
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:vibration/vibration.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
+
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
+  runApp(const PomodoroApp());
+}
+
+class PomodoroApp extends StatelessWidget {
+  const PomodoroApp({Key? key}) : super(key: key);
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'Pomodoro Pro',
+      debugShowCheckedModeBanner: false,
+      theme: ThemeData(
+        brightness: Brightness.dark,
+        scaffoldBackgroundColor: Color.fromARGB(230, 15, 4, 58),
+        useMaterial3: true,
+      ),
+      home: const PomodoroHome(),
+    );
+  }
+}
+
+class Task {
+  String id;
+  String title;
+  List<SubTask> subTasks;
+  bool isCompleted;
+  int pomodorosCompleted;
+  DateTime createdAt;
+  String? category;
+  int priority;
+
+  Task({
+    required this.id,
+    required this.title,
+    this.subTasks = const [],
+    this.isCompleted = false,
+    this.pomodorosCompleted = 0,
+    required this.createdAt,
+    this.category,
+    this.priority = 0,
+  });
+
+  Map<String, dynamic> toJson() =>
+      {
+        'id': id,
+        'title': title,
+        'subTasks': subTasks.map((s) => s.toJson()).toList(),
+        'isCompleted': isCompleted,
+        'pomodorosCompleted': pomodorosCompleted,
+        'createdAt': createdAt.toIso8601String(),
+        'category': category,
+        'priority': priority,
+      };
+
+  factory Task.fromJson(Map<String, dynamic> json) =>
+      Task(
+        id: json['id'],
+        title: json['title'],
+        subTasks: (json['subTasks'] as List)
+            .map((s) => SubTask.fromJson(s))
+            .toList(),
+        isCompleted: json['isCompleted'],
+        pomodorosCompleted: json['pomodorosCompleted'],
+        createdAt: DateTime.parse(json['createdAt']),
+        category: json['category'],
+        priority: json['priority'] ?? 0,
+      );
+}
+
+class SubTask {
+  String id;
+  String title;
+  bool isCompleted;
+  int duration;
+
+  SubTask({
+    required this.id,
+    required this.title,
+    this.isCompleted = false,
+    this.duration = 0,
+  });
+
+  Map<String, dynamic> toJson() =>
+      {
+        'id': id,
+        'title': title,
+        'isCompleted': isCompleted,
+        'duration': duration,
+      };
+
+  factory SubTask.fromJson(Map<String, dynamic> json) =>
+      SubTask(
+        id: json['id'],
+        title: json['title'],
+        isCompleted: json['isCompleted'],
+        duration: json['duration'] ?? 0,
+      );
+}
+
+class PomodoroHome extends StatefulWidget {
+  const PomodoroHome({Key? key}) : super(key: key);
+
+  @override
+  State<PomodoroHome> createState() => _PomodoroHomeState();
+}
+
+class _PomodoroHomeState extends State<PomodoroHome>
+    with TickerProviderStateMixin {
+  final FlutterLocalNotificationsPlugin notifications =
+  FlutterLocalNotificationsPlugin();
+
+  List<Task> tasks = [];
+  Task? currentTask;
+  SubTask? currentSubTask;
+
+  int workDuration = 25 * 60;
+  int shortBreakDuration = 5 * 60;
+  int longBreakDuration = 15 * 60;
+  int currentSeconds = 25 * 60;
+  int totalPomodoros = 0;
+  int todayPomodoros = 0;
+  int totalFocusTime = 0;
+
+  Timer? timer;
+  bool isRunning = false;
+  bool isBreak = false;
+  int pomodoroCount = 0;
+
+  late AnimationController dropletController;
+  int currentPage = 0;
+
+  bool autoStartBreak = false;
+  bool autoStartPomodoro = false;
+  bool enableNotifications = true;
+  bool enableVibration = true;
+  bool keepScreenOn = false;
+
+  String selectedCategory = 'All';
+  List<String> categories = ['All', 'Work', 'Study', 'Personal', 'Other'];
+
+  @override
+  void initState() {
+    super.initState();
+    _initNotifications();
+    _loadData();
+
+    dropletController = AnimationController(
+      vsync: this,
+      duration: const Duration(seconds: 2),
+    )
+      ..repeat();
+  }
+
+  Future<void> _initNotifications() async {
+    const android = AndroidInitializationSettings('@mipmap/ic_launcher');
+    const settings = InitializationSettings(android: android);
+    await notifications.initialize(settings);
+  }
+
+  Future<void> _loadData() async {
+    final prefs = await SharedPreferences.getInstance();
+    setState(() {
+      workDuration = prefs.getInt('workDuration') ?? 25 * 60;
+      shortBreakDuration = prefs.getInt('shortBreakDuration') ?? 5 * 60;
+      longBreakDuration = prefs.getInt('longBreakDuration') ?? 15 * 60;
+      totalPomodoros = prefs.getInt('totalPomodoros') ?? 0;
+      todayPomodoros = prefs.getInt('todayPomodoros') ?? 0;
+      totalFocusTime = prefs.getInt('totalFocusTime') ?? 0;
+      autoStartBreak = prefs.getBool('autoStartBreak') ?? false;
+      autoStartPomodoro = prefs.getBool('autoStartPomodoro') ?? false;
+      enableNotifications = prefs.getBool('enableNotifications') ?? true;
+      enableVibration = prefs.getBool('enableVibration') ?? true;
+      keepScreenOn = prefs.getBool('keepScreenOn') ?? false;
+
+      final tasksJson = prefs.getStringList('tasks') ?? [];
+      tasks = tasksJson
+          .map(
+            (t) => Task.fromJson(Map<String, dynamic>.from(Map.castFrom({}))),
+      )
+          .toList();
+
+      currentSeconds = workDuration;
+    });
+  }
+
+  Future<void> _saveData() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt('workDuration', workDuration);
+    await prefs.setInt('shortBreakDuration', shortBreakDuration);
+    await prefs.setInt('longBreakDuration', longBreakDuration);
+    await prefs.setInt('totalPomodoros', totalPomodoros);
+    await prefs.setInt('todayPomodoros', todayPomodoros);
+    await prefs.setInt('totalFocusTime', totalFocusTime);
+    await prefs.setBool('autoStartBreak', autoStartBreak);
+    await prefs.setBool('autoStartPomodoro', autoStartPomodoro);
+    await prefs.setBool('enableNotifications', enableNotifications);
+    await prefs.setBool('enableVibration', enableVibration);
+    await prefs.setBool('keepScreenOn', keepScreenOn);
+  }
+
+  void _startTimer() {
+    if (keepScreenOn) WakelockPlus.enable();
+
+    setState(() {
+      isRunning = true;
+    });
+
+    timer = Timer.periodic(const Duration(seconds: 1), (t) {
+      setState(() {
+        if (currentSeconds > 0) {
+          currentSeconds--;
+        } else {
+          _completeSession();
+        }
+      });
+    });
+  }
+
+  void _pauseTimer() {
+    timer?.cancel();
+    if (keepScreenOn) WakelockPlus.disable();
+    setState(() {
+      isRunning = false;
+    });
+  }
+
+  void _resetTimer() {
+    timer?.cancel();
+    if (keepScreenOn) WakelockPlus.disable();
+    setState(() {
+      isRunning = false;
+      currentSeconds = isBreak
+          ? (pomodoroCount % 4 == 0 ? longBreakDuration : shortBreakDuration)
+          : workDuration;
+    });
+  }
+
+  Future<void> _completeSession() async {
+    timer?.cancel();
+    if (keepScreenOn) WakelockPlus.disable();
+
+    if (enableVibration) {
+      final hasVibrator = await Vibration.hasVibrator() ?? false;
+      if (hasVibrator) {
+        Vibration.vibrate(duration: 1000, pattern: [0, 200, 100, 200]);
+      }
+    }
+
+    if (enableNotifications) {
+      await notifications.show(
+        0,
+        isBreak ? 'Break Complete!' : 'Pomodoro Complete!',
+        isBreak ? 'Time to focus again' : 'Time for a break',
+        const NotificationDetails(
+          android: AndroidNotificationDetails(
+            'pomodoro_channel',
+            'Pomodoro Notifications',
+            importance: Importance.high,
+            priority: Priority.high,
+          ),
+        ),
+      );
+    }
+
+    if (!isBreak) {
+      setState(() {
+        pomodoroCount++;
+        totalPomodoros++;
+        todayPomodoros++;
+        totalFocusTime += workDuration;
+        if (currentTask != null) {
+          currentTask!.pomodorosCompleted++;
+        }
+      });
+      await _saveData();
+    }
+
+    setState(() {
+      isBreak = !isBreak;
+      currentSeconds = isBreak
+          ? (pomodoroCount % 4 == 0 ? longBreakDuration : shortBreakDuration)
+          : workDuration;
+      isRunning = false;
+    });
+
+    if ((isBreak && autoStartBreak) || (!isBreak && autoStartPomodoro)) {
+      await Future.delayed(const Duration(seconds: 1));
+      _startTimer();
+    }
+  }
+
+  void _skipSession() {
+    _resetTimer();
+    setState(() {
+      isBreak = !isBreak;
+      currentSeconds = isBreak
+          ? (pomodoroCount % 4 == 0 ? longBreakDuration : shortBreakDuration)
+          : workDuration;
+    });
+  }
+
+  @override
+  void dispose() {
+    timer?.cancel();
+    dropletController.dispose();
+    WakelockPlus.disable();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Stack(
+        children: [
+          Container(
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: [Colors.black, Colors.grey.shade900, Colors.black],
+              ),
+            ),
+          ),
+          SafeArea(
+            child: IndexedStack(
+              index: currentPage,
+              children: [
+                _buildTimerPage(),
+                _buildTasksPage(),
+                _buildStatsPage(),
+                _buildSettingsPage(),
+              ],
+            ),
+          ),
+          Positioned(left: 0, right: 0, bottom: 0, child: _buildBottomNav()),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildTimerPage() {
+    return Column(
+      children: [
+        const SizedBox(height: 40),
+        _buildGlassCard(
+          child: Padding(
+            padding: const EdgeInsets.all(20),
+            child: Column(
+              children: [
+                Text(
+                  isBreak ? 'Break Time' : 'Focus Time',
+                  style: const TextStyle(fontSize: 24, letterSpacing: 2),
+                ),
+                const SizedBox(height: 10),
+                if (currentTask != null)
+                  Text(
+                    currentTask!.title,
+                    style: TextStyle(fontSize: 16, color: Colors.white70),
+                  ),
+                if (currentSubTask != null)
+                  Text(
+                    '→ ${currentSubTask!.title}',
+                    style: TextStyle(fontSize: 14, color: Colors.white60),
+                  ),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: 40),
+        Stack(
+          alignment: Alignment.center,
+          children: [
+            SizedBox(
+              width: 280,
+              height: 280,
+              child: DropletCircleLoader(
+                controller: dropletController,
+                progress: 1 - (currentSeconds / _getCurrentDuration()),
+                isRunning: isRunning,
+              ),
+            ),
+            Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  _formatTime(currentSeconds),
+                  style: const TextStyle(
+                    fontSize: 56,
+                    fontWeight: FontWeight.w300,
+                    letterSpacing: 4,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  'Pomodoro ${pomodoroCount + 1}',
+                  style: TextStyle(fontSize: 14, color: Colors.white60),
+                ),
+              ],
+            ),
+          ],
+        ),
+        const SizedBox(height: 40),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            _buildGlassButton(icon: Icons.skip_next, onTap: _skipSession),
+            const SizedBox(width: 20),
+            _buildGlassButton(
+              icon: isRunning ? Icons.pause : Icons.play_arrow,
+              onTap: isRunning ? _pauseTimer : _startTimer,
+              size: 80,
+              iconSize: 40,
+            ),
+            const SizedBox(width: 20),
+            _buildGlassButton(icon: Icons.refresh, onTap: _resetTimer),
+          ],
+        ),
+        const Spacer(),
+        _buildQuickStats(),
+        const SizedBox(height: 100),
+      ],
+    );
+  }
+
+  Widget _buildTasksPage() {
+    final filteredTasks = selectedCategory == 'All'
+        ? tasks
+        : tasks.where((t) => t.category == selectedCategory).toList();
+
+    return Column(
+      children: [
+        const SizedBox(height: 20),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 20),
+          child: Row(
+            children: [
+              const Text('Tasks', style: TextStyle(fontSize: 28)),
+              const Spacer(),
+              _buildGlassButton(
+                icon: Icons.add,
+                onTap: () => _showAddTaskDialog(),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 20),
+        SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          padding: const EdgeInsets.symmetric(horizontal: 20),
+          child: Row(
+            children: categories.map((cat) {
+              final isSelected = cat == selectedCategory;
+              return Padding(
+                padding: const EdgeInsets.only(right: 10),
+                child: GestureDetector(
+                  onTap: () => setState(() => selectedCategory = cat),
+                  child: _buildGlassCard(
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 20,
+                        vertical: 10,
+                      ),
+                      child: Text(
+                        cat,
+                        style: TextStyle(
+                          color: isSelected ? Colors.white : Colors.white60,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              );
+            }).toList(),
+          ),
+        ),
+        const SizedBox(height: 20),
+        Expanded(
+          child: filteredTasks.isEmpty
+              ? Center(
+            child: Text(
+              'No tasks yet',
+              style: TextStyle(color: Colors.white60),
+            ),
+          )
+              : ListView.builder(
+            padding: const EdgeInsets.fromLTRB(20, 0, 20, 100),
+            itemCount: filteredTasks.length,
+            itemBuilder: (context, index) {
+              final task = filteredTasks[index];
+              return _buildTaskCard(task);
+            },
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildStatsPage() {
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(20, 20, 20, 100),
+      children: [
+        const Text('Statistics', style: TextStyle(fontSize: 28)),
+        const SizedBox(height: 30),
+        _buildGlassCard(
+          child: Padding(
+            padding: const EdgeInsets.all(20),
+            child: Column(
+              children: [
+                _buildStatRow('Total Pomodoros', totalPomodoros.toString()),
+                const Divider(height: 30, color: Colors.white24),
+                _buildStatRow('Today Pomodoros', todayPomodoros.toString()),
+                const Divider(height: 30, color: Colors.white24),
+                _buildStatRow(
+                  'Total Focus Time',
+                  '${(totalFocusTime / 3600).toStringAsFixed(1)}h',
+                ),
+                const Divider(height: 30, color: Colors.white24),
+                _buildStatRow(
+                  'Tasks Completed',
+                  tasks
+                      .where((t) => t.isCompleted)
+                      .length
+                      .toString(),
+                ),
+                const Divider(height: 30, color: Colors.white24),
+                _buildStatRow(
+                  'Active Tasks',
+                  tasks
+                      .where((t) => !t.isCompleted)
+                      .length
+                      .toString(),
+                ),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: 20),
+        _buildGlassCard(
+          child: Padding(
+            padding: const EdgeInsets.all(20),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Categories',
+                  style: TextStyle(fontSize: 18, letterSpacing: 1),
+                ),
+                const SizedBox(height: 20),
+                ...categories.skip(1).map((cat) {
+                  final count = tasks
+                      .where((t) => t.category == cat)
+                      .length;
+                  return Padding(
+                    padding: const EdgeInsets.only(bottom: 10),
+                    child: _buildStatRow(cat, count.toString()),
+                  );
+                }),
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildSettingsPage() {
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(20, 20, 20, 100),
+      children: [
+        const Text('Settings', style: TextStyle(fontSize: 28)),
+        const SizedBox(height: 30),
+        _buildGlassCard(
+          child: Padding(
+            padding: const EdgeInsets.all(20),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Timer Duration',
+                  style: TextStyle(fontSize: 18, letterSpacing: 1),
+                ),
+                const SizedBox(height: 20),
+                _buildDurationSetting(
+                  'Work',
+                  workDuration,
+                      (v) => workDuration = v,
+                ),
+                const SizedBox(height: 15),
+                _buildDurationSetting(
+                  'Short Break',
+                  shortBreakDuration,
+                      (v) => shortBreakDuration = v,
+                ),
+                const SizedBox(height: 15),
+                _buildDurationSetting(
+                  'Long Break',
+                  longBreakDuration,
+                      (v) => longBreakDuration = v,
+                ),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: 20),
+        _buildGlassCard(
+          child: Padding(
+            padding: const EdgeInsets.all(20),
+            child: Column(
+              children: [
+                _buildSwitchSetting('Auto Start Break', autoStartBreak, (v) {
+                  setState(() => autoStartBreak = v);
+                  _saveData();
+                }),
+                const Divider(height: 30, color: Colors.white24),
+                _buildSwitchSetting(
+                    'Auto Start Pomodoro', autoStartPomodoro, (v,) {
+                  setState(() => autoStartPomodoro = v);
+                  _saveData();
+                }),
+                const Divider(height: 30, color: Colors.white24),
+                _buildSwitchSetting('Notifications', enableNotifications, (v) {
+                  setState(() => enableNotifications = v);
+                  _saveData();
+                }),
+                const Divider(height: 30, color: Colors.white24),
+                _buildSwitchSetting('Vibration', enableVibration, (v) {
+                  setState(() => enableVibration = v);
+                  _saveData();
+                }),
+                const Divider(height: 30, color: Colors.white24),
+                _buildSwitchSetting('Keep Screen On', keepScreenOn, (v) {
+                  setState(() => keepScreenOn = v);
+                  _saveData();
+                }),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: 20),
+        _buildGlassCard(
+          child: InkWell(
+            onTap: _showResetDialog,
+            child: const Padding(
+              padding: EdgeInsets.all(20),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(Icons.delete_forever, color: Colors.white70),
+                  SizedBox(width: 10),
+                  Text(
+                    'Reset All Data',
+                    style: TextStyle(fontSize: 16, color: Colors.white70),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildTaskCard(Task task) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 15),
+      child: _buildGlassCard(
+        child: InkWell(
+          onTap: () => _showTaskDetailDialog(task),
+          child: Padding(
+            padding: const EdgeInsets.all(20),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    GestureDetector(
+                      onTap: () {
+                        setState(() {
+                          task.isCompleted = !task.isCompleted;
+                        });
+                      },
+                      child: Container(
+                        width: 24,
+                        height: 24,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          border: Border.all(color: Colors.white60, width: 2),
+                          color: task.isCompleted
+                              ? Colors.white24
+                              : Colors.transparent,
+                        ),
+                        child: task.isCompleted
+                            ? const Icon(
+                          Icons.check,
+                          size: 16,
+                          color: Colors.white,
+                        )
+                            : null,
+                      ),
+                    ),
+                    const SizedBox(width: 15),
+                    Expanded(
+                      child: Text(
+                        task.title,
+                        style: TextStyle(
+                          fontSize: 16,
+                          decoration: task.isCompleted
+                              ? TextDecoration.lineThrough
+                              : null,
+                        ),
+                      ),
+                    ),
+                    if (task.priority > 0)
+                      Container(
+                        padding: const EdgeInsets.all(6),
+                        decoration: BoxDecoration(
+                          color: Colors.white12,
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Row(
+                          children: List.generate(
+                            task.priority,
+                                (i) =>
+                            const Icon(
+                              Icons.flag,
+                              size: 12,
+                              color: Colors.white70,
+                            ),
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+                if (task.subTasks.isNotEmpty) ...[
+                  const SizedBox(height: 15),
+                  Text(
+                    '${task.subTasks
+                        .where((s) => s.isCompleted)
+                        .length}/${task.subTasks.length} subtasks',
+                    style: const TextStyle(fontSize: 12, color: Colors.white60),
+                  ),
+                ],
+                if (task.pomodorosCompleted > 0) ...[
+                  const SizedBox(height: 10),
+                  Row(
+                    children: [
+                      const Icon(Icons.timer, size: 14, color: Colors.white60),
+                      const SizedBox(width: 5),
+                      Text(
+                        '${task.pomodorosCompleted} pomodoros',
+                        style: const TextStyle(
+                          fontSize: 12,
+                          color: Colors.white60,
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildGlassCard({required Widget child}) {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(20),
+      child: BackdropFilter(
+        filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+        child: Container(
+          decoration: BoxDecoration(
+            color: Colors.white.withOpacity(0.05),
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(color: Colors.white.withOpacity(0.1), width: 1),
+          ),
+          child: child,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildGlassButton({
+    required IconData icon,
+    required VoidCallback onTap,
+    double size = 60,
+    double iconSize = 28,
+  }) {
+    return GestureDetector(
+      onTap: onTap,
+      child: _buildGlassCard(
+        child: SizedBox(
+          width: size,
+          height: size,
+          child: Icon(icon, size: iconSize, color: Colors.white),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildBottomNav() {
+    return _buildGlassCard(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 15),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+          children: [
+            _buildNavItem(Icons.timer, 0),
+            _buildNavItem(Icons.check_circle_outline, 1),
+            _buildNavItem(Icons.bar_chart, 2),
+            _buildNavItem(Icons.settings, 3),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildNavItem(IconData icon, int index) {
+    final isSelected = currentPage == index;
+    return GestureDetector(
+      onTap: () => setState(() => currentPage = index),
+      child: Container(
+        padding: const EdgeInsets.all(12),
+        child: Icon(
+          icon,
+          color: isSelected ? Colors.white : Colors.white38,
+          size: 28,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildQuickStats() {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 40),
+      child: _buildGlassCard(
+        child: Padding(
+          padding: const EdgeInsets.all(20),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+            children: [
+              _buildQuickStat(
+                Icons.local_fire_department,
+                pomodoroCount.toString(),
+              ),
+              Container(width: 1, height: 40, color: Colors.white24),
+              _buildQuickStat(Icons.today, todayPomodoros.toString()),
+              Container(width: 1, height: 40, color: Colors.white24),
+              _buildQuickStat(Icons.timer, '${(totalFocusTime / 60).toInt()}m'),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildQuickStat(IconData icon, String value) {
+    return Column(
+      children: [
+        Icon(icon, color: Colors.white70, size: 20),
+        const SizedBox(height: 5),
+        Text(value, style: const TextStyle(fontSize: 16)),
+      ],
+    );
+  }
+
+  Widget _buildStatRow(String label, String value) {
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      children: [
+        Text(label, style: const TextStyle(color: Colors.white70)),
+        Text(value, style: const TextStyle(fontSize: 18)),
+      ],
+    );
+  }
+
+  Widget _buildDurationSetting(String label,
+      int value,
+      Function(int) onChange,) {
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      children: [
+        Text(label, style: const TextStyle(color: Colors.white70)),
+        Row(
+          children: [
+            GestureDetector(
+              onTap: () {
+                if (value > 60) {
+                  setState(() {
+                    onChange(value - 60);
+                    _saveData();
+                  });
+                }
+              },
+              child: Container(
+                padding: const EdgeInsets.all(8),
+                child: const Icon(Icons.remove, size: 20),
+              ),
+            ),
+            SizedBox(
+              width: 60,
+              child: Center(
+                child: Text(
+                  '${value ~/ 60}m',
+                  style: const TextStyle(fontSize: 16),
+                ),
+              ),
+            ),
+            GestureDetector(
+              onTap: () {
+                if (value < 3600) {
+                  setState(() {
+                    onChange(value + 60);
+                    _saveData();
+                  });
+                }
+              },
+              child: Container(
+                padding: const EdgeInsets.all(8),
+                child: const Icon(Icons.add, size: 20),
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _buildSwitchSetting(String label,
+      bool value,
+      Function(bool) onChange,) {
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      children: [
+        Text(label, style: const TextStyle(color: Colors.white70)),
+        Switch(
+          value: value,
+          onChanged: onChange,
+          activeColor: Colors.white,
+          activeTrackColor: Colors.white24,
+        ),
+      ],
+    );
+  }
+
+  void _showAddTaskDialog() {
+    final titleController = TextEditingController();
+    String selectedCat = 'Work';
+    int selectedPriority = 0;
+
+    showDialog(
+      context: context,
+      builder: (context) =>
+          StatefulBuilder(
+            builder: (context, setDialogState) =>
+                Dialog(
+                  backgroundColor: Colors.transparent,
+                  child: _buildGlassCard(
+                    child: Padding(
+                      padding: const EdgeInsets.all(20),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Text(
+                              'New Task', style: TextStyle(fontSize: 20)),
+                          const SizedBox(height: 20),
+                          TextField(
+                            controller: titleController,
+                            decoration: InputDecoration(
+                              hintText: 'Task title',
+                              hintStyle: TextStyle(color: Colors.white38),
+                              border: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(12),
+                                borderSide: BorderSide(color: Colors.white24),
+                              ),
+                              enabledBorder: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(12),
+                                borderSide: BorderSide(color: Colors.white24),
+                              ),
+                              focusedBorder: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(12),
+                                borderSide: BorderSide(color: Colors.white),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 15),
+                          DropdownButtonFormField<String>(
+                            value: selectedCat,
+                            dropdownColor: Colors.grey.shade900,
+                            decoration: InputDecoration(
+                              labelText: 'Category',
+                              labelStyle: TextStyle(color: Colors.white70),
+                              border: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(12),
+                                borderSide: BorderSide(color: Colors.white24),
+                              ),
+                              enabledBorder: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(12),
+                                borderSide: BorderSide(color: Colors.white24),
+                              ),
+                            ),
+                            items: categories
+                                .skip(1)
+                                .map((c) =>
+                                DropdownMenuItem(value: c,
+                                    child: Text(c)))
+                                .toList(),
+                            onChanged: (v) =>
+                                setDialogState(() => selectedCat = v!),
+                          ),
+                          const SizedBox(height: 15),
+                          Row(
+                            children: [
+                              Text(
+                                'Priority:',
+                                style: TextStyle(color: Colors.white70),
+                              ),
+                              const Spacer(),
+                              ...List.generate(3, (i) {
+                                return GestureDetector(
+                                  onTap: () =>
+                                      setDialogState(() =>
+                                      selectedPriority = i + 1),
+                                  child: Padding(
+                                    padding: const EdgeInsets.symmetric(
+                                        horizontal: 5),
+                                    child: Icon(
+                                      Icons.flag,
+                                      color: i < selectedPriority
+                                          ? Colors.white
+                                          : Colors.white24,
+                                    ),
+                                  ),
+                                );
+                              }),
+                            ],
+                          ),
+                          const SizedBox(height: 20),
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.end,
+                            children: [
+                              TextButton(
+                                onPressed: () => Navigator.pop(context),
+                                child: Text(
+                                  'Cancel',
+                                  style: TextStyle(color: Colors.white60),
+                                ),
+                              ),
+                              const SizedBox(width: 10),
+                              ElevatedButton(
+                                onPressed: () {
+                                  if (titleController.text.isNotEmpty) {
+                                    setState(() {
+                                      tasks.add(
+                                        Task(
+                                          id: DateTime
+                                              .now()
+                                              .millisecondsSinceEpoch
+                                              .toString(),
+                                          title: titleController.text,
+                                          createdAt: DateTime.now(),
+                                          category: selectedCat,
+                                          priority: selectedPriority,
+                                        ),
+                                      );
+                                    });
+                                    Navigator.pop(context);
+                                  }
+                                },
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor: Colors.white24,
+                                  foregroundColor: Colors.white,
+                                ),
+                                child: const Text('Add'),
+                              ),
+                            ],
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+          ),
+    );
+  }
+
+  void _showTaskDetailDialog(Task task) {
+    showDialog(
+      context: context,
+      builder: (context) =>
+          Dialog(
+            backgroundColor: Colors.transparent,
+            child: _buildGlassCard(
+              child: Padding(
+                padding: const EdgeInsets.all(20),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            task.title,
+                            style: const TextStyle(fontSize: 20),
+                          ),
+                        ),
+                        IconButton(
+                          icon: const Icon(Icons.delete, color: Colors.white70),
+                          onPressed: () {
+                            setState(() {
+                              tasks.remove(task);
+                            });
+                            Navigator.pop(context);
+                          },
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 15),
+                    Row(
+                      children: [
+                        Icon(Icons.category, size: 16, color: Colors.white60),
+                        const SizedBox(width: 8),
+                        Text(
+                          task.category ?? 'No category',
+                          style: TextStyle(color: Colors.white70),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 10),
+                    Row(
+                      children: [
+                        Icon(Icons.timer, size: 16, color: Colors.white60),
+                        const SizedBox(width: 8),
+                        Text(
+                          '${task.pomodorosCompleted} pomodoros completed',
+                          style: TextStyle(color: Colors.white70),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 20),
+                    Row(
+                      children: [
+                        Text(
+                          'Subtasks (${task.subTasks.length})',
+                          style: TextStyle(fontSize: 16, color: Colors.white70),
+                        ),
+                        const Spacer(),
+                        IconButton(
+                          icon: const Icon(Icons.add, size: 20),
+                          onPressed: () => _showAddSubTaskDialog(task),
+                        ),
+                      ],
+                    ),
+                    if (task.subTasks.isNotEmpty) ...[
+                      const SizedBox(height: 10),
+                      ...task.subTasks.map((sub) =>
+                          _buildSubTaskItem(task, sub)),
+                    ],
+                    const SizedBox(height: 20),
+                    SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton(
+                        onPressed: () {
+                          setState(() {
+                            currentTask = task;
+                            currentSubTask = null;
+                            currentPage = 0;
+                          });
+                          Navigator.pop(context);
+                        },
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.white24,
+                          foregroundColor: Colors.white,
+                          padding: const EdgeInsets.symmetric(vertical: 15),
+                        ),
+                        child: const Text('Start Task'),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+    );
+  }
+
+  Widget _buildSubTaskItem(Task task, SubTask subTask) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Row(
+        children: [
+          GestureDetector(
+            onTap: () {
+              setState(() {
+                subTask.isCompleted = !subTask.isCompleted;
+              });
+            },
+            child: Container(
+              width: 20,
+              height: 20,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                border: Border.all(color: Colors.white60, width: 2),
+                color: subTask.isCompleted
+                    ? Colors.white24
+                    : Colors.transparent,
+              ),
+              child: subTask.isCompleted
+                  ? const Icon(Icons.check, size: 12, color: Colors.white)
+                  : null,
+            ),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              subTask.title,
+              style: TextStyle(
+                color: Colors.white70,
+                decoration: subTask.isCompleted
+                    ? TextDecoration.lineThrough
+                    : null,
+              ),
+            ),
+          ),
+          if (subTask.duration > 0)
+            Text(
+              '${subTask.duration}m',
+              style: TextStyle(fontSize: 12, color: Colors.white60),
+            ),
+          IconButton(
+            icon: const Icon(Icons.play_arrow, size: 18, color: Colors.white60),
+            onPressed: () {
+              setState(() {
+                currentTask = task;
+                currentSubTask = subTask;
+                currentPage = 0;
+              });
+              Navigator.pop(context);
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showAddSubTaskDialog(Task task) {
+    final controller = TextEditingController();
+    int duration = 25;
+
+    showDialog(
+      context: context,
+      builder: (context) =>
+          StatefulBuilder(
+            builder: (context, setDialogState) =>
+                Dialog(
+                  backgroundColor: Colors.transparent,
+                  child: _buildGlassCard(
+                    child: Padding(
+                      padding: const EdgeInsets.all(20),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Text(
+                              'New Subtask', style: TextStyle(fontSize: 18)),
+                          const SizedBox(height: 20),
+                          TextField(
+                            controller: controller,
+                            decoration: InputDecoration(
+                              hintText: 'Subtask title',
+                              hintStyle: TextStyle(color: Colors.white38),
+                              border: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(12),
+                                borderSide: BorderSide(color: Colors.white24),
+                              ),
+                              enabledBorder: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(12),
+                                borderSide: BorderSide(color: Colors.white24),
+                              ),
+                              focusedBorder: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(12),
+                                borderSide: BorderSide(color: Colors.white),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 15),
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              Text('Duration', style: TextStyle(color: Colors
+                                  .white70)),
+                              Row(
+                                children: [
+                                  GestureDetector(
+                                    onTap: () {
+                                      if (duration > 5) {
+                                        setDialogState(() => duration -= 5);
+                                      }
+                                    },
+                                    child: Container(
+                                      padding: const EdgeInsets.all(8),
+                                      child: const Icon(Icons.remove, size: 20),
+                                    ),
+                                  ),
+                                  SizedBox(
+                                    width: 60,
+                                    child: Center(
+                                      child: Text(
+                                        '${duration}m',
+                                        style: const TextStyle(fontSize: 16),
+                                      ),
+                                    ),
+                                  ),
+                                  GestureDetector(
+                                    onTap: () {
+                                      if (duration < 120) {
+                                        setDialogState(() => duration += 5);
+                                      }
+                                    },
+                                    child: Container(
+                                      padding: const EdgeInsets.all(8),
+                                      child: const Icon(Icons.add, size: 20),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 20),
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.end,
+                            children: [
+                              TextButton(
+                                onPressed: () => Navigator.pop(context),
+                                child: Text(
+                                  'Cancel',
+                                  style: TextStyle(color: Colors.white60),
+                                ),
+                              ),
+                              const SizedBox(width: 10),
+                              ElevatedButton(
+                                onPressed: () {
+                                  if (controller.text.isNotEmpty) {
+                                    setState(() {
+                                      task.subTasks.add(
+                                        SubTask(
+                                          id: DateTime
+                                              .now()
+                                              .millisecondsSinceEpoch
+                                              .toString(),
+                                          title: controller.text,
+                                          duration: duration,
+                                        ),
+                                      );
+                                    });
+                                    Navigator.pop(context);
+                                  }
+                                },
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor: Colors.white24,
+                                  foregroundColor: Colors.white,
+                                ),
+                                child: const Text('Add'),
+                              ),
+                            ],
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+          ),
+    );
+  }
+
+  void _showResetDialog() {
+    showDialog(
+      context: context,
+      builder: (context) =>
+          Dialog(
+            backgroundColor: Colors.transparent,
+            child: _buildGlassCard(
+              child: Padding(
+                padding: const EdgeInsets.all(20),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(
+                      Icons.warning_amber_rounded,
+                      size: 48,
+                      color: Colors.white70,
+                    ),
+                    const SizedBox(height: 15),
+                    const Text(
+                        'Reset All Data?', style: TextStyle(fontSize: 20)),
+                    const SizedBox(height: 10),
+                    Text(
+                      'This will delete all tasks, statistics, and settings.',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(color: Colors.white60),
+                    ),
+                    const SizedBox(height: 20),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.end,
+                      children: [
+                        TextButton(
+                          onPressed: () => Navigator.pop(context),
+                          child: Text(
+                            'Cancel',
+                            style: TextStyle(color: Colors.white60),
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        ElevatedButton(
+                          onPressed: () async {
+                            final prefs = await SharedPreferences.getInstance();
+                            await prefs.clear();
+                            setState(() {
+                              tasks.clear();
+                              totalPomodoros = 0;
+                              todayPomodoros = 0;
+                              totalFocusTime = 0;
+                              pomodoroCount = 0;
+                              workDuration = 25 * 60;
+                              shortBreakDuration = 5 * 60;
+                              longBreakDuration = 15 * 60;
+                              currentSeconds = workDuration;
+                              currentTask = null;
+                              currentSubTask = null;
+                            });
+                            Navigator.pop(context);
+                          },
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.white24,
+                            foregroundColor: Colors.white,
+                          ),
+                          child: const Text('Reset'),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+    );
+  }
+
+  String _formatTime(int seconds) {
+    int minutes = seconds ~/ 60;
+    int secs = seconds % 60;
+    return '${minutes.toString().padLeft(2, '0')}:${secs.toString().padLeft(
+        2, '0')}';
+  }
+
+  int _getCurrentDuration() {
+    if (isBreak) {
+      return pomodoroCount % 4 == 0 ? longBreakDuration : shortBreakDuration;
+    }
+    return workDuration;
+  }
+}
+
+class DropletCircleLoader extends StatelessWidget {
+  final AnimationController controller;
+  final double progress;
+  final bool isRunning;
+
+  const DropletCircleLoader({
+    Key? key,
+    required this.controller,
+    required this.progress,
+    required this.isRunning,
+  }) : super(key: key);
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: controller,
+      builder: (context, child) {
+        return CustomPaint(
+          painter: DropletCirclePainter(
+            progress: progress,
+            animationValue: controller.value,
+            isRunning: isRunning,
+          ),
+          size: const Size(280, 280),
+        );
+      },
+    );
+  }
+}
+
+class DropletCirclePainter extends CustomPainter {
+  final double progress;
+  final double animationValue;
+  final bool isRunning;
+
+  DropletCirclePainter({
+    required this.progress,
+    required this.animationValue,
+    required this.isRunning,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final center = Offset(size.width / 2, size.height / 2);
+    final radius = size.width / 2;
+
+    final backgroundPaint = Paint()
+      ..color = Colors.white.withOpacity(0.05)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 20;
+
+    canvas.drawCircle(center, radius - 10, backgroundPaint);
+
+    final progressPaint = Paint()
+      ..shader = LinearGradient(
+        colors: [Colors.white.withOpacity(0.3), Colors.white.withOpacity(0.1)],
+      ).createShader(Rect.fromCircle(center: center, radius: radius))
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 20
+      ..strokeCap = StrokeCap.round;
+
+    final progressPath = Path();
+    final sweepAngle = 2 * 3.14159 * progress;
+
+    progressPath.addArc(
+      Rect.fromCircle(center: center, radius: radius - 10),
+      -3.14159 / 2,
+      sweepAngle,
+    );
+
+    canvas.drawPath(progressPath, progressPaint);
+
+    if (isRunning) {
+      for (int i = 0; i < 8; i++) {
+        final angle = (animationValue * 2 * 3.14159) + (i * 3.14159 / 4);
+        final dropletRadius = 4 + (i % 2) * 2;
+
+        final x = center.dx + (radius - 10) * cos(angle);
+        final y = center.dy + (radius - 10) * sin(angle);
+
+        final dropletPaint = Paint()
+          ..color = Colors.white.withOpacity(0.3 - (i * 0.03))
+          ..style = PaintingStyle.fill;
+
+        final path = Path();
+        path.moveTo(x, y - dropletRadius);
+        path.quadraticBezierTo(
+          x + dropletRadius,
+          y - dropletRadius / 2,
+          x + dropletRadius / 2,
+          y + dropletRadius / 2,
+        );
+        path.quadraticBezierTo(
+          x,
+          y + dropletRadius,
+          x - dropletRadius / 2,
+          y + dropletRadius / 2,
+        );
+        path.quadraticBezierTo(
+          x - dropletRadius,
+          y - dropletRadius / 2,
+          x,
+          y - dropletRadius,
+        );
+
+        canvas.drawPath(path, dropletPaint);
+      }
+    }
+
+    final glowPaint = Paint()
+      ..color = Colors.white.withOpacity(0.05)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 30
+      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 15);
+
+    canvas.drawCircle(center, radius - 10, glowPaint);
+  }
+
+  @override
+  bool shouldRepaint(DropletCirclePainter oldDelegate) {
+    return oldDelegate.progress != progress ||
+        oldDelegate.animationValue != animationValue ||
+        oldDelegate.isRunning != isRunning;
+  }
+}

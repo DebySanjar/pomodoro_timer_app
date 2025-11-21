@@ -1,67 +1,92 @@
 import 'package:flutter/material.dart';
 
-class HomeScreen extends StatefulWidget {
+class HomeScreen extends StatelessWidget {
   const HomeScreen({super.key});
-
-  @override
-  State<HomeScreen> createState() => _HomeScreenState();
-}
-
-class _HomeScreenState extends State<HomeScreen> {
-
-  Object? salom = "Assalomu alaykum";
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      floatingActionButton: FloatingActionButton(
-        onPressed: () {
-          makeSnack("$salom", context);
-        },
-        child: Icon(Icons.add),
-      ),
-      backgroundColor: Colors.green,
+      backgroundColor: Colors.tealAccent,
       appBar: AppBar(
-        title: Text("Salom  dunyo"),
-        titleTextStyle: TextStyle(
-          fontSize: 22,
-          fontWeight: FontWeight.bold,
-          color: Colors.white,
+        title: const Text(
+          'About me',
+          style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
         ),
-        backgroundColor: Colors.teal,
-        leading: IconButton(
-          icon: Icon(Icons.menu, color: Colors.blue),
-          onPressed: () {
-            makeSnack("Menu ezildi", context);
-          },
-        ),
-        actions: [
-          IconButton(
-            icon: Icon(Icons.search, color: Colors.deepOrange),
-            onPressed: () {},
-          ),
-          IconButton(
-            icon: Icon(Icons.save, color: Colors.purpleAccent),
-            onPressed: () {},
-          ),
-        ],
-
-        leadingWidth: 30,
-
-        flexibleSpace: Container(
-          decoration: BoxDecoration(
-            gradient: LinearGradient(
-              colors: [Colors.red, Colors.purpleAccent, Colors.pink],
+        centerTitle: true,
+        backgroundColor: Colors.blueAccent,
+      ),
+      body: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.start,
+          children: [
+            // Avatar
+            Container(
+              margin: const EdgeInsets.symmetric(vertical: 40),
+              child: const CircleAvatar(
+                radius: 100,
+                backgroundImage: AssetImage("assets/avater.png"),
+              ),
             ),
-          ),
-        ),
 
-        centerTitle: false,
+            // Name & Role
+            Column(
+              children: const [
+                Text(
+                  "Sanjar Programmer",
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.w800,
+                    fontSize: 25,
+                  ),
+                ),
+                SizedBox(height: 5),
+                Text(
+                  "Flutter Developer",
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.w800,
+                    fontSize: 25,
+                  ),
+                ),
+              ],
+            ),
+
+            const SizedBox(height: 30),
+
+            // Contacts Block
+            Column(
+              children: const [
+                Text(
+                  "Kontaktlar",
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.w900,
+                    fontSize: 20,
+                  ),
+                ),
+                SizedBox(height: 10),
+                Text(
+                  "📞 Telefon: +998 93 494 15 22",
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.w900,
+                    fontSize: 20,
+                  ),
+                ),
+                SizedBox(height: 10),
+                Text(
+                  "✉️ Email: sanjar@example.com",
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.w900,
+                    fontSize: 20,
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
       ),
     );
-  }
-
-  static void makeSnack(String a, context) {
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("$a")));
   }
 }
