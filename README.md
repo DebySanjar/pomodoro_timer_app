@@ -1,16 +1,20 @@
-# pomodoro2
+# Pomodoro App 🍅
 
-A new Flutter project.
+Pomodoro App — bu sizning vaqtni samarali boshqarishingiz uchun mo‘ljallangan mobil ilova. Ilova **Pomodoro texnikasi** asosida ishlaydi, ya’ni 25 daqiqa ishlash + 5 daqiqa dam olish sikllari bilan sizning samaradorligingizni oshiradi.
 
-## Getting Started
+## Xususiyatlar
+- Pomodoro timer: 25 daqiqa ishlash + 5 daqiqa dam olish
+- Foydalanuvchi sozlamalari orqali vaqtni o‘zgartirish
+- Ish vaqti tugagach bildirishnoma
+- To‘liq offline ishlash
+- Oddiy va qulay UI
 
-This project is a starting point for a Flutter application.
+## Texnologiyalar
+- Flutter & Dart
+- Provider / State Management
+- Local notifications
 
-A few resources to get you started if this is your first Flutter project:
-
-- [Lab: Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Cookbook: Useful Flutter samples](https://docs.flutter.dev/cookbook)
-
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+## O‘rnatish
+1. Git repozitoriyani klonlash:
+```bash
+git clone <https://github.com/DebySanjar/appbar_full_flutter>
