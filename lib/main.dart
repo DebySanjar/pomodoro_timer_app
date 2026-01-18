@@ -301,6 +301,9 @@ class _PomodoroHomeState extends State<PomodoroHome>
   int totalTasksCompleted = 0;
   double avgFocusTime = 0;
 
+  // ========== DOUBLE BACK PRESS TO EXIT ==========
+  DateTime? lastBackPressed;
+
   @override
   void initState() {
     super.initState();
@@ -349,6 +352,13 @@ class _PomodoroHomeState extends State<PomodoroHome>
     await notifications.initialize(
       const InitializationSettings(android: android),
     );
+
+    // Request notification permission
+    await notifications
+        .resolvePlatformSpecificImplementation<
+          AndroidFlutterLocalNotificationsPlugin
+        >()
+        ?.requestNotificationsPermission();
   }
 
   void _loadData() {
@@ -762,54 +772,86 @@ class _PomodoroHomeState extends State<PomodoroHome>
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      resizeToAvoidBottomInset: false,
-      body: Stack(
-        children: [
-          Container(
-            decoration: BoxDecoration(
-              gradient: LinearGradient(
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
-                colors: [_bgStart, _bgMid, _bgStart],
+    return PopScope(
+      canPop: false,
+      onPopInvoked: (didPop) async {
+        if (didPop) return;
+
+        final now = DateTime.now();
+        if (lastBackPressed == null ||
+            now.difference(lastBackPressed!) > const Duration(seconds: 2)) {
+          lastBackPressed = now;
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: const Text('Press back again to exit'),
+              duration: const Duration(seconds: 2),
+              backgroundColor: Colors.orangeAccent,
+              behavior: SnackBarBehavior.floating,
+              margin: const EdgeInsets.all(16),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12),
               ),
             ),
-          ),
-          SafeArea(
-            child: IndexedStack(
-              index: currentPage,
-              children: [
-                _buildTimerPage(),
-                _buildTasksPage(),
-                _buildAnalyticsPage(),
-                _buildSettingsPage(),
-              ],
+          );
+        } else {
+          // Exit the app
+          await SystemChannels.platform.invokeMethod('SystemNavigator.pop');
+        }
+      },
+      child: Scaffold(
+        resizeToAvoidBottomInset: false,
+        body: Stack(
+          children: [
+            Container(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                  colors: [_bgStart, _bgMid, _bgStart],
+                ),
+              ),
             ),
-          ),
-          if (!isFullscreenMode)
-            Positioned(left: 0, right: 0, bottom: 0, child: _buildBottomNav()),
-          Align(
-            alignment: Alignment.topCenter,
-            child: ConfettiWidget(
-              confettiController: _confettiController,
-              blastDirectionality: BlastDirectionality.explosive,
-              emissionFrequency: 0.1,
-              numberOfParticles: 40,
-              maxBlastForce: 150,
-              minBlastForce: 80,
-              gravity: 0.1,
-              colors: const [
-                Colors.red,
-                Colors.yellow,
-                Colors.orange,
-                Colors.pink,
-                Colors.blue,
-                Colors.purple,
-              ],
-              createParticlePath: createMixedParticles,
+            SafeArea(
+              child: IndexedStack(
+                index: currentPage,
+                children: [
+                  _buildTimerPage(),
+                  _buildTasksPage(),
+                  _buildAnalyticsPage(),
+                  _buildSettingsPage(),
+                ],
+              ),
             ),
-          ),
-        ],
+            if (!isFullscreenMode)
+              Positioned(
+                left: 0,
+                right: 0,
+                bottom: 0,
+                child: _buildBottomNav(),
+              ),
+            Align(
+              alignment: Alignment.topCenter,
+              child: ConfettiWidget(
+                confettiController: _confettiController,
+                blastDirectionality: BlastDirectionality.explosive,
+                emissionFrequency: 0.1,
+                numberOfParticles: 40,
+                maxBlastForce: 150,
+                minBlastForce: 80,
+                gravity: 0.1,
+                colors: const [
+                  Colors.red,
+                  Colors.yellow,
+                  Colors.orange,
+                  Colors.pink,
+                  Colors.blue,
+                  Colors.purple,
+                ],
+                createParticlePath: createMixedParticles,
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -2194,6 +2236,31 @@ class _PomodoroHomeState extends State<PomodoroHome>
         const SizedBox(height: 20),
         _buildGlassCard(
           child: InkWell(
+            onTap: _showAboutDialog,
+            borderRadius: BorderRadius.circular(20),
+            child: Padding(
+              padding: const EdgeInsets.all(20),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(Icons.info_outline, color: _textColor),
+                  const SizedBox(width: 10),
+                  Text(
+                    'About Pomaxi',
+                    style: TextStyle(
+                      fontSize: 16,
+                      color: _textColor,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(height: 20),
+        _buildGlassCard(
+          child: InkWell(
             onTap: _showResetDialog,
             borderRadius: BorderRadius.circular(20),
             child: const Padding(
@@ -2255,7 +2322,7 @@ class _PomodoroHomeState extends State<PomodoroHome>
   Widget _buildBottomNav() {
     return Container(
       decoration: BoxDecoration(
-        color: _cardBg,
+        color: widget.isDark ? const Color(0xFF1A0B5E) : Colors.white,
         borderRadius: const BorderRadius.vertical(top: Radius.circular(25)),
         border: Border.all(color: _borderColor, width: 1),
       ),
@@ -2798,6 +2865,162 @@ class _PomodoroHomeState extends State<PomodoroHome>
                 foregroundColor: _textColor,
               ),
               child: const Text('Add'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _showAboutDialog() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (context) => Container(
+        constraints: BoxConstraints(
+          maxHeight: MediaQuery.of(context).size.height * 0.8,
+        ),
+        decoration: BoxDecoration(
+          color: widget.isDark ? const Color(0xFF1A0B5E) : Colors.white,
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(25)),
+          border: Border.all(color: _borderColor, width: 1),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              padding: const EdgeInsets.all(24),
+              child: Column(
+                children: [
+                  Container(
+                    width: 40,
+                    height: 4,
+                    decoration: BoxDecoration(
+                      color: _textSecondary.withOpacity(0.3),
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                  ),
+                  const SizedBox(height: 20),
+                  Icon(Icons.timer, size: 64, color: Colors.orangeAccent),
+                  const SizedBox(height: 16),
+                  Text(
+                    'Pomaxi',
+                    style: TextStyle(
+                      fontSize: 28,
+                      fontWeight: FontWeight.bold,
+                      color: _textColor,
+                      letterSpacing: 1,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Version 1.0.0',
+                    style: TextStyle(fontSize: 16, color: _textSecondary),
+                  ),
+                ],
+              ),
+            ),
+            Flexible(
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.symmetric(horizontal: 24),
+                child: Column(
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.all(16),
+                      decoration: BoxDecoration(
+                        color: _cardBg,
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: _borderColor, width: 1),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'About Pomodoro Technique',
+                            style: TextStyle(
+                              fontSize: 18,
+                              fontWeight: FontWeight.w600,
+                              color: _textColor,
+                            ),
+                          ),
+                          const SizedBox(height: 12),
+                          Text(
+                            '• 25 minutes of focused work\n'
+                            '• 5 minutes short break\n'
+                            '• 15-30 minutes long break after 4 pomodoros\n'
+                            '• Improve focus and productivity\n'
+                            '• Better time management and stress reduction',
+                            style: TextStyle(
+                              fontSize: 14,
+                              color: _textSecondary,
+                              height: 1.5,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    Container(
+                      padding: const EdgeInsets.all(16),
+                      decoration: BoxDecoration(
+                        color: _cardBg,
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: _borderColor, width: 1),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'App Features',
+                            style: TextStyle(
+                              fontSize: 18,
+                              fontWeight: FontWeight.w600,
+                              color: _textColor,
+                            ),
+                          ),
+                          const SizedBox(height: 12),
+                          Text(
+                            '• Customizable timer settings\n'
+                            '• Task and subtask management\n'
+                            '• Daily and weekly statistics\n'
+                            '• Focus mode and attention tracking\n'
+                            '• Background sounds and notifications\n'
+                            '• Dark and light themes',
+                            style: TextStyle(
+                              fontSize: 14,
+                              color: _textSecondary,
+                              height: 1.5,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 24),
+                  ],
+                ),
+              ),
+            ),
+            Container(
+              padding: const EdgeInsets.all(24),
+              child: SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  onPressed: () => Navigator.pop(context),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.orangeAccent,
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 16),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                  ),
+                  child: const Text(
+                    'Close',
+                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+                  ),
+                ),
+              ),
             ),
           ],
         ),
